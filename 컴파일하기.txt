@@ -1,0 +1,5 @@
+BUILDING.md 참조
+
+ 요약하면
+    - bin 폴더하나 만들고 거기들어가서
+    - cmake ../ -G "Visual Studio 16 2019" -A x64
