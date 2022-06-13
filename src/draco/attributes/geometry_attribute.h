@@ -65,6 +65,8 @@ class GeometryAttribute {
     // Total number of different attribute types.
     // Always keep behind all named attributes.
     NAMED_ATTRIBUTES_COUNT,
+    // copycd:: 3dtiles에서 사용함.
+    _BATCHID,
   };
 
   GeometryAttribute();

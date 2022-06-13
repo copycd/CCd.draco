@@ -72,6 +72,9 @@ GeometryAttribute::Type GltfAttributeToDracoAttribute(
     return GeometryAttribute::JOINTS;
   } else if (attribute_name == "WEIGHTS_0") {
     return GeometryAttribute::WEIGHTS;
+    // copycd:: 추가.
+  } else if (attribute_name == "_BATCHID") {
+    return GeometryAttribute::_BATCHID;
   }
   return GeometryAttribute::INVALID;
 }
@@ -865,6 +868,8 @@ Status GltfDecoder::AddAttributeDataByTypes(
   typedef VectorD<uint8_t, 2> Vector2u8i;
   typedef VectorD<uint8_t, 3> Vector3u8i;
   typedef VectorD<uint8_t, 4> Vector4u8i;
+  // copycd::추가.
+  typedef VectorD<uint16_t, 1> Vector1u16i;
   typedef VectorD<uint16_t, 2> Vector2u16i;
   typedef VectorD<uint16_t, 3> Vector3u16i;
   typedef VectorD<uint16_t, 4> Vector4u16i;
@@ -950,6 +955,22 @@ Status GltfDecoder::AddAttributeDataByTypes(
                         "Add attribute data, unknown component type.");
       }
       break;
+      // copycd:: _BATCHID 때문에 추가함.
+    case TINYGLTF_TYPE_SCALAR:
+      switch (accessor.componentType) {
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+          DRACO_ASSIGN_OR_RETURN(
+              std::vector<Vector1u16i> data,
+              CopyDataAs<Vector1u16i>(gltf_model_, accessor));
+          SetValuesPerFace<Vector1u16i>(indices_data, att_id, number_of_faces,
+                                        data, reverse_winding, mb);
+        } break;
+        default:
+          return Status(Status::DRACO_ERROR,
+                        "Add attribute data, unknown component type.");
+      }
+      break;
+
     default:
       return Status(Status::DRACO_ERROR, "Add attribute data, unknown type.");
   }

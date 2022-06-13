@@ -26,6 +26,7 @@ namespace {
 // TODO(fgalligan): Add support for no compression to the transcoder lib.
 void Usage() {
   // TODO(b/204212351): Revisit using a raw string literal here for readability.
+  printf("Version: CCD.1.2022.06\n\n");
   printf("Usage: draco_transcoder [options] -i input -o output\n\n");
   printf("Main options:\n");
   printf("  -h | -?         show help.\n");
