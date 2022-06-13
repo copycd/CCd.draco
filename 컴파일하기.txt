@@ -1,5 +1,15 @@
-BUILDING.md 참조
+[third_party 관련]
+해당 폴더안에 소스가 없으면,
+root에서 아래 명령을 수행하면 다운로드됨.
+ git submodule update --init
 
+[BUILDING.md] 참조
  요약하면
     - bin 폴더하나 만들고 거기들어가서
     - cmake ../ -G "Visual Studio 16 2019" -A x64
+
+
+[DRACO_TRANSCODER_SUPPORTED]
+를 할려면,
+third_party  밑에 라이브러리들을 채워줘야함. ( 위에방법참조)
+cmakelist.txt 에도 DRACO_TRANSCODER_SUPPORTED를 추가해야함. ( 해놓았음)

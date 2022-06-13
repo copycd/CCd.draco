@@ -19,6 +19,12 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# copycd::
+set(DRACO_TRANSCODER_SUPPORTED true)
+#add_compile_definitions(-DDRACO_TRANSCODER_SUPPORTED)
+#set(eigen_path "D:\gitHub\draco-copycd\third_party")
+
+
 set(draco_root "${CMAKE_CURRENT_SOURCE_DIR}")
 set(draco_src_root "${draco_root}/src/draco")
 set(draco_build "${CMAKE_BINARY_DIR}")
