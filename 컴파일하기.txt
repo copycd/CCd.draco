@@ -13,3 +13,4 @@ root에서 아래 명령을 수행하면 다운로드됨.
 를 할려면,
 third_party  밑에 라이브러리들을 채워줘야함. ( 위에방법참조)
 cmakelist.txt 에도 DRACO_TRANSCODER_SUPPORTED를 추가해야함. ( 해놓았음)
+ ex) set(DRACO_TRANSCODER_SUPPORTED true)
