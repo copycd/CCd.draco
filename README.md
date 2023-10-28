@@ -14,6 +14,37 @@ delays can result in transient errors that can be difficult to diagnose when
 new Draco releases are launched. To avoid the issue pin your sites to a
 versioned release.
 
+### Version 1.5.6 release:
+* Using the versioned www.gstatic.com WASM and Javascript decoders continues
+  to be recommended. To use v1.5.6, use this URL:
+  * https://www.gstatic.com/draco/versioned/decoders/1.5.6/*
+* The CMake flag DRACO_DEBUG_MSVC_WARNINGS has been replaced with
+  DRACO_DEBUG_COMPILER_WARNINGS, and the behavior has changed. It is now a
+  boolean flag defined in draco_options.cmake.
+* Bug fixes.
+* Security fixes.
+
+### Version 1.5.5 release:
+* Using the versioned www.gstatic.com WASM and Javascript decoders continues
+  to be recommended. To use v1.5.5, use this URL:
+  * https://www.gstatic.com/draco/versioned/decoders/1.5.5/*
+* Bug fix: https://github.com/google/draco/issues/935
+
+### Version 1.5.4 release:
+* Using the versioned www.gstatic.com WASM and Javascript decoders continues
+  to be recommended. To use v1.5.4, use this URL:
+  * https://www.gstatic.com/draco/versioned/decoders/1.5.4/*
+* Added partial support for glTF extensions EXT_mesh_features and
+  EXT_structural_metadata.
+* Bug fixes.
+* Security fixes.
+
+### Version 1.5.3 release:
+* Using the versioned www.gstatic.com WASM and Javascript decoders continues
+  to be recommended. To use v1.5.3, use this URL:
+  * https://www.gstatic.com/draco/versioned/decoders/1.5.3/*
+* Bug fixes.
+
 ### Version 1.5.2 release
 * This is the same as v1.5.1 with the following two bug fixes:
   * Fixes DRACO_TRANSCODER_SUPPORTED enabled builds.
@@ -233,9 +264,9 @@ will output usage and options.
 Encoding Tool
 -------------
 
-`draco_encoder` will read OBJ or PLY files as input, and output Draco-encoded
-files. We have included Stanford's [Bunny] mesh for testing. The basic command
-line looks like this:
+`draco_encoder` will read OBJ, STL or PLY files as input, and output
+Draco-encoded files. We have included Stanford's [Bunny] mesh for testing. The
+basic command line looks like this:
 
 ~~~~~ bash
 ./draco_encoder -i testdata/bun_zipper.ply -o out.drc
@@ -288,8 +319,8 @@ and denser point clouds.
 Decoding Tool
 -------------
 
-`draco_decoder` will read Draco files as input, and output OBJ or PLY files.
-The basic command line looks like this:
+`draco_decoder` will read Draco files as input, and output OBJ, STL or PLY
+files. The basic command line looks like this:
 
 ~~~~~ bash
 ./draco_decoder -i in.drc -o out.obj

@@ -1,16 +1,16 @@
 # Copyright 2021 The Draco Authors
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy of
+# the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations under
+# the License.
 
 if(DRACO_CMAKE_DRACO_FLAGS_CMAKE_)
   return()
@@ -38,7 +38,7 @@ macro(draco_set_compiler_flags_for_sources)
   endif()
 
   set_source_files_properties(${compiler_SOURCES} PROPERTIES COMPILE_FLAGS
-                              ${compiler_FLAGS})
+                                                             ${compiler_FLAGS})
 
   if(DRACO_VERBOSE GREATER 1)
     foreach(source ${compiler_SOURCES})
@@ -99,8 +99,8 @@ macro(draco_test_cxx_flag)
   # are passed as a list it will remove the list separators, and attempt to run
   # a compile command using list entries concatenated together as a single
   # argument. Avoid the problem by forcing the argument to be a string.
-  draco_set_and_stringify(SOURCE_VARS all_cxx_flags DEST all_cxx_flags)
-  check_cxx_compiler_flag("${all_cxx_flags}" draco_all_cxx_flags_pass)
+  draco_set_and_stringify(SOURCE_VARS all_cxx_flags DEST all_cxx_flags_string)
+  check_cxx_compiler_flag("${all_cxx_flags_string}" draco_all_cxx_flags_pass)
 
   if(cxx_test_FLAG_REQUIRED AND NOT draco_all_cxx_flags_pass)
     draco_die("Flag test failed for required flag(s): "

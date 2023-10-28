@@ -14,6 +14,9 @@
 //
 #include "draco/io/gltf_utils.h"
 
+#include <ostream>
+#include <string>
+
 #ifdef DRACO_TRANSCODER_SUPPORTED
 namespace draco {
 
@@ -36,6 +39,22 @@ std::ostream &operator<<(std::ostream &os, const Indent &indent) {
   return os << indent.indent_;
 }
 
+std::ostream &operator<<(std::ostream &os,
+                         const JsonWriter::IndentWrapper &indent) {
+  if (indent.writer.mode_ == JsonWriter::READABLE) {
+    os << indent.writer.indent_writer_;
+  }
+  return os;
+}
+
+std::ostream &operator<<(std::ostream &os,
+                         const JsonWriter::Separator &separator) {
+  if (separator.writer.mode_ == JsonWriter::READABLE) {
+    os << " ";
+  }
+  return os;
+}
+
 void JsonWriter::Reset() {
   last_type_ = START;
   o_.clear();
@@ -48,27 +67,27 @@ void JsonWriter::BeginObject(const std::string &name) {
   FinishPreviousLine(BEGIN);
   o_ << indent_;
   if (!name.empty()) {
-    o_ << "\"" << name << "\": ";
+    o_ << "\"" << name << "\":" << separator_;
   }
   o_ << "{";
-  indent_.Increase();
+  indent_writer_.Increase();
 }
 
 void JsonWriter::EndObject() {
   FinishPreviousLine(END);
-  indent_.Decrease();
+  indent_writer_.Decrease();
   o_ << indent_ << "}";
 }
 
 void JsonWriter::BeginArray(const std::string &name) {
   FinishPreviousLine(BEGIN);
-  o_ << indent_ << "\"" << name << "\": [";
-  indent_.Increase();
+  o_ << indent_ << "\"" << name << "\":" << separator_ << "[";
+  indent_writer_.Increase();
 }
 
 void JsonWriter::EndArray() {
   FinishPreviousLine(END);
-  indent_.Decrease();
+  indent_writer_.Decrease();
   o_ << indent_ << "]";
 }
 
@@ -80,7 +99,9 @@ void JsonWriter::FinishPreviousLine(OutputType curr_type) {
         (last_type_ == END && curr_type == VALUE)) {
       o_ << ",";
     }
-    o_ << std::endl;
+    if (mode_ == READABLE) {
+      o_ << std::endl;
+    }
   }
   last_type_ = curr_type;
 }
@@ -89,6 +110,43 @@ std::string JsonWriter::MoveData() {
   const std::string str = o_.str();
   o_.str("");
   return str;
+}
+
+std::string JsonWriter::EscapeCharacter(const std::string &str,
+                                        const char character) {
+  size_t start = 0;
+  if ((start = str.find(character, start)) != std::string::npos) {
+    std::string s = str;
+    std::string escaped_character = "\\";
+    escaped_character += character;
+    do {
+      s.replace(start, 1, escaped_character);
+      start += escaped_character.length();
+    } while ((start = s.find(character, start)) != std::string::npos);
+    return s;
+  }
+  return str;
+}
+
+std::string JsonWriter::EscapeJsonSpecialCharacters(const std::string &str) {
+  std::string s = str;
+  const char backspace = '\b';
+  const char form_feed = '\f';
+  const char newline = '\n';
+  const char carriage_return = '\r';
+  const char tab = '\t';
+  const char double_quote = '\"';
+  const char backslash = '\\';
+
+  // Backslash must come first.
+  s = EscapeCharacter(s, backslash);
+  s = EscapeCharacter(s, backspace);
+  s = EscapeCharacter(s, form_feed);
+  s = EscapeCharacter(s, newline);
+  s = EscapeCharacter(s, carriage_return);
+  s = EscapeCharacter(s, tab);
+  s = EscapeCharacter(s, double_quote);
+  return s;
 }
 
 }  // namespace draco

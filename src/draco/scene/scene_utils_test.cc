@@ -255,8 +255,7 @@ TEST(SceneUtilsTest, TestMeshToSceneZeroMaterials) {
   ASSERT_EQ(scene_from_mesh->NumMeshGroups(), 1);
   const draco::MeshGroup *const mesh_group =
       scene_from_mesh->GetMeshGroup(draco::MeshGroupIndex(0));
-  ASSERT_EQ(mesh_group->NumMeshIndices(), 1);
-  ASSERT_EQ(mesh_group->NumMaterialIndices(), 1);
+  ASSERT_EQ(mesh_group->NumMeshInstances(), 1);
 }
 
 TEST(SceneUtilsTest, TestMeshToSceneOneMaterial) {
@@ -278,8 +277,7 @@ TEST(SceneUtilsTest, TestMeshToSceneOneMaterial) {
   ASSERT_EQ(scene_from_mesh->NumMeshGroups(), 1);
   const draco::MeshGroup *const mesh_group =
       scene_from_mesh->GetMeshGroup(draco::MeshGroupIndex(0));
-  ASSERT_EQ(mesh_group->NumMeshIndices(), 1);
-  ASSERT_EQ(mesh_group->NumMaterialIndices(), 1);
+  ASSERT_EQ(mesh_group->NumMeshInstances(), 1);
 
   CompareScenes(scene.get(), scene_from_mesh.get());
 }
@@ -301,11 +299,56 @@ TEST(SceneUtilsTest, TestMeshToSceneMultipleMaterials) {
   ASSERT_EQ(scene_from_mesh->NumMeshGroups(), 1);
   const draco::MeshGroup *const mesh_group =
       scene_from_mesh->GetMeshGroup(draco::MeshGroupIndex(0));
-  ASSERT_EQ(mesh_group->NumMeshIndices(), 4);
-  ASSERT_EQ(mesh_group->NumMaterialIndices(), 4);
+  ASSERT_EQ(mesh_group->NumMeshInstances(), 4);
 
   // Unfortunately we can't CompareScenes(scene.get(), scene_from_mesh.get()),
   // because scene has two mesh groups and scene_from_mesh has only one.
+}
+
+TEST(SceneUtilsTest, TestMeshToSceneMultipleMeshFeatures) {
+  const std::string filename = "BoxesMeta/glTF/BoxesMeta.gltf";
+  std::unique_ptr<draco::Scene> scene = draco::ReadSceneFromTestFile(filename);
+  ASSERT_NE(scene, nullptr);
+  std::unique_ptr<draco::Mesh> mesh = draco::ReadMeshFromTestFile(filename);
+  ASSERT_NE(mesh, nullptr);
+  ASSERT_EQ(mesh->GetMaterialLibrary().NumMaterials(), 2);
+  ASSERT_EQ(mesh->NumMeshFeatures(), 5);
+
+  DRACO_ASSIGN_OR_ASSERT(const std::unique_ptr<draco::Scene> scene_from_mesh,
+                         draco::SceneUtils::MeshToScene(std::move(mesh)));
+  ASSERT_NE(scene_from_mesh, nullptr);
+  ASSERT_EQ(scene_from_mesh->NumMeshes(), 2);
+  ASSERT_EQ(scene_from_mesh->GetMaterialLibrary().NumMaterials(), 2);
+  ASSERT_EQ(scene_from_mesh->NumMeshGroups(), 1);
+  const draco::MeshGroup *const mesh_group =
+      scene_from_mesh->GetMeshGroup(draco::MeshGroupIndex(0));
+  ASSERT_EQ(mesh_group->NumMeshInstances(), 2);
+
+  // Meshes of the new scene should have the same properties as meshes loaded
+  // directly into |scene|.
+  for (draco::MeshIndex mi(0); mi < scene->NumMeshes(); ++mi) {
+    ASSERT_EQ(scene->GetMesh(mi).NumMeshFeatures(),
+              scene_from_mesh->GetMesh(mi).NumMeshFeatures());
+    for (draco::MeshFeaturesIndex mfi(0);
+         mfi < scene->GetMesh(mi).NumMeshFeatures(); ++mfi) {
+      const auto &scene_mf = scene->GetMesh(mi).GetMeshFeatures(mfi);
+      const auto &scene_from_mesh_mf =
+          scene_from_mesh->GetMesh(mi).GetMeshFeatures(mfi);
+      ASSERT_EQ(scene_mf.GetAttributeIndex(),
+                scene_from_mesh_mf.GetAttributeIndex());
+      ASSERT_EQ(scene_mf.GetPropertyTableIndex(),
+                scene_from_mesh_mf.GetPropertyTableIndex());
+      ASSERT_EQ(scene_mf.GetLabel(), scene_from_mesh_mf.GetLabel());
+      ASSERT_EQ(scene_mf.GetNullFeatureId(),
+                scene_from_mesh_mf.GetNullFeatureId());
+      ASSERT_EQ(scene_mf.GetFeatureCount(),
+                scene_from_mesh_mf.GetFeatureCount());
+      ASSERT_EQ(scene_mf.GetTextureChannels(),
+                scene_from_mesh_mf.GetTextureChannels());
+      ASSERT_EQ(scene_mf.GetTextureMap().texture() != nullptr,
+                scene_from_mesh_mf.GetTextureMap().texture() != nullptr);
+    }
+  }
 }
 
 TEST(SceneUtilsTest, TestInstantiateMeshWithIdentityTransformation) {
@@ -389,9 +432,9 @@ TEST(SceneUtilsTest, TestCleanupEmptyMeshGroup) {
 
   // Invalidate references to the three truck body parts in mesh group.
   draco::MeshGroup &mesh_group = *scene->GetMeshGroup(draco::MeshGroupIndex(0));
-  mesh_group.SetMeshIndex(0, draco::kInvalidMeshIndex);
-  mesh_group.SetMeshIndex(1, draco::kInvalidMeshIndex);
-  mesh_group.SetMeshIndex(2, draco::kInvalidMeshIndex);
+  mesh_group.SetMeshInstance(0, {draco::kInvalidMeshIndex, 0});
+  mesh_group.SetMeshInstance(1, {draco::kInvalidMeshIndex, 0});
+  mesh_group.SetMeshInstance(2, {draco::kInvalidMeshIndex, 0});
 
   // Cleanup scene.
   draco::SceneUtils::Cleanup(scene.get());
@@ -439,9 +482,9 @@ TEST(SceneUtilsTest, TestCleanupInvalidMeshIndex) {
 
   // Invalidate references to two truck body parts in mesh group.
   draco::MeshGroup &mesh_group = *scene->GetMeshGroup(draco::MeshGroupIndex(0));
-  ASSERT_EQ(mesh_group.NumMeshIndices(), 3);
-  mesh_group.SetMeshIndex(0, draco::kInvalidMeshIndex);
-  mesh_group.SetMeshIndex(2, draco::kInvalidMeshIndex);
+  ASSERT_EQ(mesh_group.NumMeshInstances(), 3);
+  mesh_group.SetMeshInstance(0, {draco::kInvalidMeshIndex, 0});
+  mesh_group.SetMeshInstance(2, {draco::kInvalidMeshIndex, 0});
 
   // Cleanup scene.
   draco::SceneUtils::Cleanup(scene.get());
@@ -450,7 +493,61 @@ TEST(SceneUtilsTest, TestCleanupInvalidMeshIndex) {
   ASSERT_EQ(scene->NumMeshes(), 2);
   ASSERT_EQ(scene->NumMeshGroups(), 2);
   ASSERT_EQ(draco::SceneUtils::ComputeAllInstances(*scene).size(), 3);
-  ASSERT_EQ(scene->GetMeshGroup(draco::MeshGroupIndex(0))->NumMeshIndices(), 1);
+  ASSERT_EQ(scene->GetMeshGroup(draco::MeshGroupIndex(0))->NumMeshInstances(),
+            1);
+}
+
+TEST(SceneUtilsTest, TestCleanupUnusedNodes) {
+  auto scene =
+      draco::ReadSceneFromTestFile("CesiumMilkTruck/glTF/CesiumMilkTruck.gltf");
+  ASSERT_NE(scene, nullptr);
+  ASSERT_EQ(scene->NumNodes(), 5);
+
+  draco::SceneUtils::CleanupOptions options;
+  options.remove_unused_nodes = true;
+
+  // Delete mesh on node 2 and try to remove unused nodes.
+  // Node 2 is connected to node 1 that has no mesh as well. But node 2 is also
+  // used in an animation so we don't actually expect anything to be deleted.
+  scene->GetNode(draco::SceneNodeIndex(2))
+      ->SetMeshGroupIndex(draco::kInvalidMeshGroupIndex);
+  draco::SceneUtils::Cleanup(scene.get(), options);
+
+  ASSERT_EQ(scene->NumNodes(), 5);
+
+  // Now remove the animation channel that used the node and try it again. This
+  // time, we expect two nodes to be deleted (node 1 and node 2). Node 1 will be
+  // deleted because it doesn't contain a mesh and all its children are unused.
+  ASSERT_EQ(scene->GetAnimation(draco::AnimationIndex(0))
+                ->GetChannel(0)
+                ->target_index,
+            2);
+  // Change the mapped node to node 4 (we can't actually remove channel as of
+  // the time this test was written).
+  scene->GetAnimation(draco::AnimationIndex(0))->GetChannel(0)->target_index =
+      4;
+
+  // Cleanup again.
+  draco::SceneUtils::Cleanup(scene.get(), options);
+  ASSERT_EQ(scene->NumNodes(), 3);  // Two nodes should be deleted.
+
+  // Ensure all node indices are remapped to the new values.
+  for (draco::SceneNodeIndex sni(0); sni < scene->NumNodes(); ++sni) {
+    const auto *node = scene->GetNode(sni);
+    for (int i = 0; i < node->NumChildren(); ++i) {
+      ASSERT_LT(node->Child(i).value(), 3);
+    }
+    for (int i = 0; i < node->NumParents(); ++i) {
+      ASSERT_LT(node->Parent(i).value(), 3);
+    }
+  }
+
+  // Ensure the animation channels are mapped to the updated node indices (node
+  // 4 should be new node 2 because two nodes were removed).
+  ASSERT_EQ(scene->GetAnimation(draco::AnimationIndex(0))
+                ->GetChannel(0)
+                ->target_index,
+            2);
 }
 
 TEST(SceneUtilsTest, TestDeduplicateMeshGroups) {
@@ -471,7 +568,7 @@ TEST(SceneUtilsTest, TestDeduplicateMeshGroups) {
   ASSERT_EQ(draco::SceneUtils::ComputeAllInstances(*scene).size(), 7);
 }
 
-TEST(SceneUtilsTest, TestCleanupUnusedTexCoords) {
+TEST(SceneUtilsTest, TestCleanupUnusedTexCoordsNoTextures) {
   // The glTF file has two tex coords that are unused because the materials do
   // not reference any textures.
   auto scene = draco::ReadSceneFromTestFile("UnusedTexCoords/NoTextures.gltf");
@@ -480,11 +577,75 @@ TEST(SceneUtilsTest, TestCleanupUnusedTexCoords) {
                 .NumNamedAttributes(draco::GeometryAttribute::TEX_COORD),
             2);
 
-  // Cleanup scene.
+  // Cleanup scene and check that unused UV are not removed by default.
   draco::SceneUtils::Cleanup(scene.get());
   ASSERT_EQ(scene->GetMesh(draco::MeshIndex(0))
                 .NumNamedAttributes(draco::GeometryAttribute::TEX_COORD),
+            2);
+
+  // Cleanup scene and check that unused UV are removed when requested.
+  draco::SceneUtils::CleanupOptions options;
+  options.remove_unused_tex_coords = true;
+  draco::SceneUtils::Cleanup(scene.get(), options);
+  ASSERT_EQ(scene->GetMesh(draco::MeshIndex(0))
+                .NumNamedAttributes(draco::GeometryAttribute::TEX_COORD),
             0);
+}
+
+TEST(SceneUtilsTest, TestCleanupUnusedTexCoords0NoReferences) {
+  auto scene = draco::ReadSceneFromTestFile(
+      "UnusedTexCoords/TexCoord0InvalidTexCoord1Valid.gltf");
+  ASSERT_NE(scene, nullptr);
+  typedef draco::GeometryAttribute Att;
+
+  draco::Mesh &mesh = scene->GetMesh(draco::MeshIndex(0));
+  ASSERT_EQ(mesh.NumNamedAttributes(Att::TEX_COORD), 2);
+  ASSERT_EQ(mesh.GetNamedAttribute(Att::TEX_COORD, 0)->size(), 14);
+  ASSERT_EQ(mesh.GetNamedAttribute(Att::TEX_COORD, 1)->size(), 4);
+  auto &ml = scene->GetMaterialLibrary();
+  ASSERT_EQ(ml.NumMaterials(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->NumTextureMaps(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->GetTextureMapByIndex(0)->tex_coord_index(), 1);
+
+  // Cleanup unused texture coordinate attributes.
+  draco::SceneUtils::CleanupOptions options;
+  options.remove_unused_tex_coords = true;
+  draco::SceneUtils::Cleanup(scene.get(), options);
+
+  // Check that the unreferenced attribute was removed.
+  ASSERT_EQ(mesh.NumNamedAttributes(Att::TEX_COORD), 1);
+  ASSERT_EQ(mesh.GetNamedAttribute(Att::TEX_COORD, 0)->size(), 4);
+  ASSERT_EQ(ml.NumMaterials(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->NumTextureMaps(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->GetTextureMapByIndex(0)->tex_coord_index(), 0);
+}
+
+TEST(SceneUtilsTest, TestCleanupUnusedTexCoords1NoReferences) {
+  auto scene = draco::ReadSceneFromTestFile(
+      "UnusedTexCoords/TexCoord0ValidTexCoord1Invalid.gltf");
+  ASSERT_NE(scene, nullptr);
+  typedef draco::GeometryAttribute Att;
+
+  draco::Mesh &mesh = scene->GetMesh(draco::MeshIndex(0));
+  ASSERT_EQ(mesh.NumNamedAttributes(Att::TEX_COORD), 2);
+  ASSERT_EQ(mesh.GetNamedAttribute(Att::TEX_COORD, 0)->size(), 14);
+  ASSERT_EQ(mesh.GetNamedAttribute(Att::TEX_COORD, 1)->size(), 4);
+  auto &ml = scene->GetMaterialLibrary();
+  ASSERT_EQ(ml.NumMaterials(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->NumTextureMaps(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->GetTextureMapByIndex(0)->tex_coord_index(), 0);
+
+  // Cleanup unused texture coordinate attributes.
+  draco::SceneUtils::CleanupOptions options;
+  options.remove_unused_tex_coords = true;
+  draco::SceneUtils::Cleanup(scene.get(), options);
+
+  // Check that the unreferenced attribute was removed.
+  ASSERT_EQ(mesh.NumNamedAttributes(Att::TEX_COORD), 1);
+  ASSERT_EQ(mesh.GetNamedAttribute(Att::TEX_COORD, 0)->size(), 14);
+  ASSERT_EQ(ml.NumMaterials(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->NumTextureMaps(), 1);
+  ASSERT_EQ(ml.GetMaterial(0)->GetTextureMapByIndex(0)->tex_coord_index(), 0);
 }
 
 TEST(SceneUtilsTest, TestComputeGlobalNodeTransform) {
@@ -575,6 +736,26 @@ TEST(SceneUtilsTest, TestSetDracoCompressionOptions) {
   ASSERT_FALSE(scene->GetMesh(MeshIndex(1)).IsCompressionEnabled());
   ASSERT_FALSE(scene->GetMesh(MeshIndex(2)).IsCompressionEnabled());
   ASSERT_FALSE(scene->GetMesh(MeshIndex(3)).IsCompressionEnabled());
+}
+
+TEST(SceneUtilsTest, TestFindLargestBaseMeshTransforms) {
+  // Tests that FindLargestBaseMeshTransforms() works as expected.
+  auto scene =
+      draco::ReadSceneFromTestFile("CubeScaledInstances/glTF/cube_att.gltf");
+  ASSERT_NE(scene, nullptr);
+
+  // There should be one base mesh with four instances.
+  ASSERT_EQ(scene->NumMeshes(), 1);
+  ASSERT_EQ(draco::SceneUtils::ComputeAllInstances(*scene).size(), 4);
+
+  const auto transforms =
+      draco::SceneUtils::FindLargestBaseMeshTransforms(*scene);
+
+  ASSERT_EQ(transforms.size(), 1);  // One transform for the single base mesh.
+
+  // The largest instance should have a uniform scale 4.
+  const draco::MeshIndex mi(0);
+  ASSERT_EQ(transforms[mi].diagonal(), Eigen::Vector4d(4, 4, 4, 1));
 }
 
 }  // namespace

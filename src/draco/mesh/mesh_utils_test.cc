@@ -140,8 +140,9 @@ TEST(MeshUtilsTest, CountDegenerateValuesLantern) {
         scene->GetMeshGroup(draco::MeshGroupIndex(mgi));
     ASSERT_NE(mesh_group, nullptr);
 
-    for (int mi = 0; mi < mesh_group->NumMeshIndices(); ++mi) {
-      const draco::MeshIndex mesh_index = mesh_group->GetMeshIndex(mi);
+    for (int mi = 0; mi < mesh_group->NumMeshInstances(); ++mi) {
+      const draco::MeshIndex mesh_index =
+          mesh_group->GetMeshInstance(mi).mesh_index;
       const draco::Mesh &m = scene->GetMesh(mesh_index);
 
       for (int i = 0; i < m.num_attributes(); ++i) {
@@ -344,6 +345,45 @@ TEST(MeshUtilsTest, CheckMergeMetadata) {
   ASSERT_TRUE(other_mesh->GetMetadata()->GetEntryInt("test_int_shared",
                                                      &metadata_value));
   ASSERT_EQ(metadata_value, 3);
+}
+
+TEST(MeshUtilsTest, RemoveUnusedMeshFeatures) {
+  // Test verifies that MeshUtils::RemoveUnusedMeshFeatures works as intended.
+  std::unique_ptr<draco::Mesh> mesh =
+      draco::ReadMeshFromTestFile("BoxesMeta/glTF/BoxesMeta.gltf");
+  ASSERT_NE(mesh, nullptr);
+
+  // The input mesh should have five mesh features and two features textures.
+  ASSERT_EQ(mesh->NumMeshFeatures(), 5);
+  ASSERT_EQ(mesh->GetNonMaterialTextureLibrary().NumTextures(), 2);
+
+  // All of those features and textures should be used so calling the method
+  // below shouldn't do anything.
+  draco::MeshUtils::RemoveUnusedMeshFeatures(mesh.get());
+  ASSERT_EQ(mesh->NumMeshFeatures(), 5);
+  ASSERT_EQ(mesh->GetNonMaterialTextureLibrary().NumTextures(), 2);
+
+  // Now remove material 1 that is mapped to first two mesh features.
+  draco::PointAttribute *mat_att = mesh->attribute(
+      mesh->GetNamedAttributeId(draco::GeometryAttribute::MATERIAL));
+
+  // This basically remaps all faces from material 1 to material 0.
+  uint32_t mat_index = 0;
+  mat_att->SetAttributeValue(draco::AttributeValueIndex(1), &mat_index);
+
+  // Try to remove the mesh features again.
+  draco::MeshUtils::RemoveUnusedMeshFeatures(mesh.get());
+
+  // Three of the mesh features should have been removed as well as one mesh
+  // features texture.
+  ASSERT_EQ(mesh->NumMeshFeatures(), 2);
+  ASSERT_EQ(mesh->GetNonMaterialTextureLibrary().NumTextures(), 1);
+
+  // Ensure the remaining mesh features are mapped to the correct material.
+  for (draco::MeshFeaturesIndex mfi(0); mfi < mesh->NumMeshFeatures(); ++mfi) {
+    ASSERT_EQ(mesh->NumMeshFeaturesMaterialMasks(mfi), 1);
+    ASSERT_EQ(mesh->GetMeshFeaturesMaterialMask(mfi, 0), 0);
+  }
 }
 
 }  // namespace

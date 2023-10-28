@@ -61,7 +61,35 @@ void Scene::Copy(const Scene &s) {
     lights_[i]->Copy(*s.lights_[i]);
   }
 
+  instance_arrays_.resize(s.instance_arrays_.size());
+  for (InstanceArrayIndex i(0); i < instance_arrays_.size(); ++i) {
+    instance_arrays_[i] = std::unique_ptr<InstanceArray>(new InstanceArray());
+    instance_arrays_[i]->Copy(*s.instance_arrays_[i]);
+  }
+
   material_library_.Copy(s.material_library_);
+
+#ifdef DRACO_TRANSCODER_SUPPORTED
+  // Copy non-material textures.
+  non_material_texture_library_.Copy(s.non_material_texture_library_);
+
+  // Update pointers to non-material textures in mesh feature ID sets of all
+  // scene meshes.
+  if (non_material_texture_library_.NumTextures() != 0) {
+    const auto texture_to_index_map =
+        s.non_material_texture_library_.ComputeTextureToIndexMap();
+    for (MeshIndex i(0); i < NumMeshes(); ++i) {
+      for (MeshFeaturesIndex j(0); j < GetMesh(i).NumMeshFeatures(); ++j) {
+        Mesh::UpdateMeshFeaturesTexturePointer(texture_to_index_map,
+                                               &non_material_texture_library_,
+                                               &GetMesh(i).GetMeshFeatures(j));
+      }
+    }
+  }
+#endif  // DRACO_TRANSCODER_SUPPORTED
+
+  // Copy structural metadata.
+  structural_metadata_.Copy(s.structural_metadata_);
 }
 
 Status Scene::RemoveMesh(MeshIndex index) {
@@ -76,15 +104,16 @@ Status Scene::RemoveMesh(MeshIndex index) {
   // Remove references to removed base mesh and corresponding materials from
   // mesh groups, and update references to remaining base meshes in mesh groups.
   for (MeshGroupIndex mgi(0); mgi < NumMeshGroups(); ++mgi) {
-    MeshGroup *mesh_group = GetMeshGroup(mgi);
+    MeshGroup *const mesh_group = GetMeshGroup(mgi);
     if (!mesh_group) {
       return Status(Status::DRACO_ERROR, "MeshGroup is null.");
     }
-    mesh_group->RemoveMeshIndex(index);
-    for (int i = 0; i < mesh_group->NumMeshIndices(); ++i) {
-      const MeshIndex mi = mesh_group->GetMeshIndex(i);
-      if (mi > index && mi != kInvalidMeshIndex) {
-        mesh_group->SetMeshIndex(i, mi - 1);
+    mesh_group->RemoveMeshInstances(index);
+    for (int i = 0; i < mesh_group->NumMeshInstances(); ++i) {
+      MeshGroup::MeshInstance &mesh_instance = mesh_group->GetMeshInstance(i);
+      if (mesh_instance.mesh_index > index &&
+          mesh_instance.mesh_index != kInvalidMeshIndex) {
+        mesh_instance.mesh_index--;
       }
     }
   }
@@ -109,7 +138,8 @@ Status Scene::RemoveMeshGroup(MeshGroupIndex index) {
     const MeshGroupIndex mgi = node->GetMeshGroupIndex();
     if (mgi == index) {
       // TODO(vytyaz): Remove the node if possible, e.g., when node has no
-      // geometry, no child nodes, no skins, and no lights.
+      // geometry, no child nodes, no skins, no lights, and no mesh group
+      // instance arrays.
       node->SetMeshGroupIndex(kInvalidMeshGroupIndex);
     } else if (mgi > index && mgi != kInvalidMeshGroupIndex) {
       node->SetMeshGroupIndex(mgi - 1);
@@ -127,11 +157,11 @@ Status Scene::RemoveMaterial(int index) {
   // Update material indices of mesh instances.
   for (MeshGroupIndex mgi(0); mgi < NumMeshGroups(); ++mgi) {
     MeshGroup *const mesh_group = GetMeshGroup(mgi);
-    for (int i = 0; i < mesh_group->NumMaterialIndices(); i++) {
-      const int material_index = mesh_group->GetMaterialIndex(i);
-      if (material_index > index) {
-        mesh_group->SetMaterialIndex(i, material_index - 1);
-      } else if (material_index == index) {
+    for (int i = 0; i < mesh_group->NumMeshInstances(); i++) {
+      MeshGroup::MeshInstance &mesh_instance = mesh_group->GetMeshInstance(i);
+      if (mesh_instance.material_index > index) {
+        mesh_instance.material_index--;
+      } else if (mesh_instance.material_index == index) {
         return Status(Status::DRACO_ERROR, "Removed material has references.");
       }
     }

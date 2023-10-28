@@ -26,7 +26,6 @@ namespace {
 // TODO(fgalligan): Add support for no compression to the transcoder lib.
 void Usage() {
   // TODO(b/204212351): Revisit using a raw string literal here for readability.
-  printf("Version: CCD.1.2022.06\n\n");
   printf("Usage: draco_transcoder [options] -i input -o output\n\n");
   printf("Main options:\n");
   printf("  -h | -?         show help.\n");
@@ -93,8 +92,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp("-o", argv[i]) && i < argc_check) {
       file_options.output_filename = argv[++i];
     } else if (!strcmp("-qp", argv[i]) && i < argc_check) {
-      transcode_options.geometry.quantization_bits_position =
-          StringToInt(argv[++i]);
+      transcode_options.geometry.quantization_position.SetQuantizationBits(
+          StringToInt(argv[++i]));
     } else if (!strcmp("-qt", argv[i]) && i < argc_check) {
       transcode_options.geometry.quantization_bits_tex_coord =
           StringToInt(argv[++i]);

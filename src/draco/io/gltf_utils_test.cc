@@ -100,6 +100,47 @@ TEST_F(GltfUtilsTest, TestValues) {
   CompareGolden(&json_writer, "\"test bool\": true");
 }
 
+TEST_F(GltfUtilsTest, TestSpecialCharacters) {
+  JsonWriter json_writer;
+  const std::string test_double_quote = "I am double quote\"";
+  json_writer.OutputValue("test double quote", test_double_quote);
+  CompareGolden(&json_writer,
+                "\"test double quote\": \"I am double quote\\\"\"");
+
+  json_writer.Reset();
+  const std::string test_backspace = "I am backspace\b";
+  json_writer.OutputValue("test backspace", test_backspace);
+  CompareGolden(&json_writer, "\"test backspace\": \"I am backspace\\\b\"");
+
+  json_writer.Reset();
+  const std::string test_form_feed = "I am form feed\f";
+  json_writer.OutputValue("test form feed", test_form_feed);
+  CompareGolden(&json_writer, "\"test form feed\": \"I am form feed\\\f\"");
+
+  json_writer.Reset();
+  const std::string test_newline = "I am newline\n";
+  json_writer.OutputValue("test newline", test_newline);
+  CompareGolden(&json_writer, "\"test newline\": \"I am newline\\\n\"");
+
+  json_writer.Reset();
+  const std::string test_tab = "I am tab\t";
+  json_writer.OutputValue("test tab", test_tab);
+  CompareGolden(&json_writer, "\"test tab\": \"I am tab\\\t\"");
+
+  json_writer.Reset();
+  const std::string test_backslash = "I am backslash\\";
+  json_writer.OutputValue("test backslash", test_backslash);
+  CompareGolden(&json_writer, "\"test backslash\": \"I am backslash\\\\\"");
+
+  json_writer.Reset();
+  const std::string test_multiple_special_characters = "\"break\"and\\more\"\\";
+  json_writer.OutputValue("test multiple_special_characters",
+                          test_multiple_special_characters);
+  CompareGolden(&json_writer,
+                "\"test multiple_special_characters\": "
+                "\"\\\"break\\\"and\\\\more\\\"\\\\\"");
+}
+
 TEST_F(GltfUtilsTest, TestObjects) {
   JsonWriter json_writer;
   json_writer.BeginObject();
@@ -239,6 +280,85 @@ TEST_F(GltfUtilsTest, TestGltfValues) {
   json_writer.OutputValue(float_value_0);
   json_writer.OutputValue(float_value_1);
   CompareGolden(&json_writer, "0.10000000149011612,\n1");
+}
+
+TEST_F(GltfUtilsTest, TestObjectsCompact) {
+  JsonWriter json_writer;
+  json_writer.SetMode(JsonWriter::COMPACT);
+  json_writer.BeginObject();
+  json_writer.EndObject();
+  CompareGolden(&json_writer, "{}");
+
+  json_writer.Reset();
+  json_writer.BeginObject("object");
+  json_writer.EndObject();
+  CompareGolden(&json_writer, "\"object\":{}");
+
+  json_writer.Reset();
+  json_writer.BeginObject("object");
+  json_writer.OutputValue(0);
+  json_writer.EndObject();
+  CompareGolden(&json_writer, "\"object\":{0}");
+
+  json_writer.Reset();
+  json_writer.BeginObject("object");
+  json_writer.OutputValue(0);
+  json_writer.OutputValue(1);
+  json_writer.OutputValue(2);
+  json_writer.OutputValue(3);
+  json_writer.EndObject();
+  CompareGolden(&json_writer, "\"object\":{0,1,2,3}");
+
+  json_writer.Reset();
+  json_writer.BeginObject("object1");
+  json_writer.EndObject();
+  json_writer.BeginObject("object2");
+  json_writer.EndObject();
+  CompareGolden(&json_writer, "\"object1\":{},\"object2\":{}");
+
+  json_writer.Reset();
+  json_writer.BeginObject("object1");
+  json_writer.BeginObject("object2");
+  json_writer.EndObject();
+  json_writer.EndObject();
+  CompareGolden(&json_writer, "\"object1\":{\"object2\":{}}");
+}
+
+TEST_F(GltfUtilsTest, TestArraysCompact) {
+  JsonWriter json_writer;
+  json_writer.SetMode(JsonWriter::COMPACT);
+  json_writer.BeginArray("array");
+  json_writer.EndArray();
+  CompareGolden(&json_writer, "\"array\":[]");
+
+  json_writer.Reset();
+  json_writer.BeginArray("array");
+  json_writer.OutputValue(0);
+  json_writer.EndArray();
+  CompareGolden(&json_writer, "\"array\":[0]");
+
+  json_writer.Reset();
+  json_writer.BeginArray("array");
+  json_writer.OutputValue(0);
+  json_writer.OutputValue(1);
+  json_writer.OutputValue(2);
+  json_writer.OutputValue(3);
+  json_writer.EndArray();
+  CompareGolden(&json_writer, "\"array\":[0,1,2,3]");
+
+  json_writer.Reset();
+  json_writer.BeginArray("array1");
+  json_writer.EndArray();
+  json_writer.BeginArray("array2");
+  json_writer.EndArray();
+  CompareGolden(&json_writer, "\"array1\":[],\"array2\":[]");
+
+  json_writer.Reset();
+  json_writer.BeginArray("array1");
+  json_writer.BeginArray("array2");
+  json_writer.EndArray();
+  json_writer.EndArray();
+  CompareGolden(&json_writer, "\"array1\":[\"array2\":[]]");
 }
 
 }  // namespace draco

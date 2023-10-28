@@ -15,23 +15,28 @@
 #include "draco/io/gltf_decoder.h"
 
 #ifdef DRACO_TRANSCODER_SUPPORTED
-
 #include <memory>
+#include <set>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "draco/core/draco_types.h"
 #include "draco/core/hash_utils.h"
 #include "draco/core/status.h"
 #include "draco/core/status_or.h"
 #include "draco/io/tiny_gltf_utils.h"
+#include "draco/material/material_library.h"
 #include "draco/mesh/mesh.h"
+#include "draco/mesh/mesh_features.h"
 #include "draco/mesh/triangle_soup_mesh_builder.h"
+#include "draco/metadata/property_table.h"
+#include "draco/point_cloud/point_cloud_builder.h"
 #include "draco/scene/scene_indices.h"
 #include "draco/texture/source_image.h"
 #include "draco/texture/texture_utils.h"
-#include "tiny_gltf.h"
 
 namespace draco {
 
@@ -171,12 +176,77 @@ StatusOr<std::vector<uint32_t>> CopyDataAsUint32(
   return output;
 }
 
-template <typename VectorT>
-StatusOr<std::vector<VectorT>> CopyDataAs(const tinygltf::Model &model,
-                                          const tinygltf::Accessor &accessor) {
+// Specialization for arithmetic types.
+template <
+    typename TypeT,
+    typename std::enable_if<std::is_arithmetic<TypeT>::value>::type * = nullptr>
+StatusOr<std::vector<TypeT>> CopyDataAs(const tinygltf::Model &model,
+                                        const tinygltf::Accessor &accessor) {
+  if (std::is_same<TypeT, uint8_t>::value) {
+    if (TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE != accessor.componentType) {
+      return ErrorStatus("Accessor data cannot be converted to Uint8.");
+    }
+  } else if (std::is_same<TypeT, uint16_t>::value) {
+    if (TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE != accessor.componentType &&
+        TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT != accessor.componentType) {
+      return ErrorStatus("Accessor data cannot be converted to Uint16.");
+    }
+  } else if (std::is_same<TypeT, uint32_t>::value) {
+    if (TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE != accessor.componentType &&
+        TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT != accessor.componentType &&
+        TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT != accessor.componentType) {
+      return ErrorStatus("Accessor data cannot be converted to Uint32.");
+    }
+  } else if (std::is_same<TypeT, float>::value) {
+    if (TINYGLTF_COMPONENT_TYPE_FLOAT != accessor.componentType) {
+      return ErrorStatus("Accessor data cannot be converted to Float.");
+    }
+  }
+  if (accessor.bufferView < 0) {
+    return Status(Status::DRACO_ERROR, "Error CopyDataAs() bufferView < 0.");
+  }
+
+  const tinygltf::BufferView &buffer_view =
+      model.bufferViews[accessor.bufferView];
+  if (buffer_view.buffer < 0) {
+    return Status(Status::DRACO_ERROR, "Error CopyDataAs() buffer < 0.");
+  }
+
+  const tinygltf::Buffer &buffer = model.buffers[buffer_view.buffer];
+
+  const uint8_t *const data_start =
+      buffer.data.data() + buffer_view.byteOffset + accessor.byteOffset;
+  const int byte_stride = accessor.ByteStride(buffer_view);
+  const int component_size =
+      tinygltf::GetComponentSizeInBytes(accessor.componentType);
+
+  std::vector<TypeT> output;
+  output.resize(accessor.count);
+
   const int num_components =
       TinyGltfUtils::GetNumComponentsForType(accessor.type);
-  if (num_components != VectorT::dimension) {
+  int out_index = 0;
+  const uint8_t *data = data_start;
+  for (int i = 0; i < accessor.count; ++i) {
+    for (int c = 0; c < num_components; ++c) {
+      TypeT value = 0;
+      memcpy(&value, data + (c * component_size), component_size);
+      output[out_index++] = value;
+    }
+    data += byte_stride;
+  }
+  return output;
+}
+
+// Specialization for remaining types is used for draco::VectorD.
+template <typename TypeT,
+          typename std::enable_if<!std::is_arithmetic<TypeT>::value>::type * =
+              nullptr>
+StatusOr<std::vector<TypeT>> CopyDataAs(const tinygltf::Model &model,
+                                        const tinygltf::Accessor &accessor) {
+  const int num_components =
+      TinyGltfUtils::GetNumComponentsForType(accessor.type);
+  if (num_components != TypeT::dimension) {
     return Status(Status::DRACO_ERROR,
                   "Dimension does not equal num components.");
   }
@@ -198,21 +268,18 @@ StatusOr<std::vector<VectorT>> CopyDataAs(const tinygltf::Model &model,
   const int component_size =
       tinygltf::GetComponentSizeInBytes(accessor.componentType);
 
-  std::vector<VectorT> output;
+  std::vector<TypeT> output;
   output.resize(accessor.count);
 
   const uint8_t *data = data_start;
   for (int i = 0; i < accessor.count; ++i) {
-    VectorT values;
-
+    TypeT values;
     for (int c = 0; c < num_components; ++c) {
       memcpy(&values[c], data + (c * component_size), component_size);
     }
-
     output[i] = values;
     data += byte_stride;
   }
-
   return output;
 }
 
@@ -221,11 +288,11 @@ StatusOr<std::vector<VectorT>> CopyDataAs(const tinygltf::Model &model,
 Status CopyDataFromBufferView(const tinygltf::Model &model, int buffer_view_id,
                               std::vector<uint8_t> *data) {
   if (buffer_view_id < 0) {
-    return Status(Status::DRACO_ERROR, "Error CopyDataAs() bufferView < 0.");
+    return ErrorStatus("Error CopyDataFromBufferView() bufferView < 0.");
   }
   const tinygltf::BufferView &buffer_view = model.bufferViews[buffer_view_id];
   if (buffer_view.buffer < 0) {
-    return Status(Status::DRACO_ERROR, "Error CopyDataAs() buffer < 0.");
+    return ErrorStatus("Error CopyDataFromBufferView() buffer < 0.");
   }
   if (buffer_view.byteStride != 0) {
     return Status(Status::DRACO_ERROR, "Error buffer view byteStride != 0.");
@@ -363,7 +430,11 @@ bool WriteWholeFile(std::string * /*err*/, const std::string &filepath,
 }  // namespace
 
 GltfDecoder::GltfDecoder()
-    : next_face_id_(0), total_indices_count_(0), material_att_id_(-1) {}
+    : next_face_id_(0),
+      next_point_id_(0),
+      total_face_indices_count_(0),
+      total_point_indices_count_(0),
+      material_att_id_(-1) {}
 
 StatusOr<std::unique_ptr<Mesh>> GltfDecoder::DecodeFromFile(
     const std::string &file_name) {
@@ -441,6 +512,7 @@ Status GltfDecoder::LoadBuffer(const DecoderBuffer &buffer) {
   tinygltf::TinyGLTF loader;
   std::string err;
   std::string warn;
+
   if (!loader.LoadBinaryFromMemory(
           &gltf_model_, &err, &warn,
           reinterpret_cast<const unsigned char *>(buffer.data_head()),
@@ -455,8 +527,18 @@ Status GltfDecoder::LoadBuffer(const DecoderBuffer &buffer) {
 
 StatusOr<std::unique_ptr<Mesh>> GltfDecoder::BuildMesh() {
   DRACO_RETURN_IF_ERROR(GatherAttributeAndMaterialStats());
-  mb_.Start(total_indices_count_ / 3);
-  DRACO_RETURN_IF_ERROR(AddAttributesToDracoMesh());
+  if (total_face_indices_count_ > 0 && total_point_indices_count_ > 0) {
+    return ErrorStatus(
+        "Decoding to mesh can't handle triangle and point primitives at the "
+        "same time.");
+  }
+  if (total_face_indices_count_ > 0) {
+    mb_.Start(total_face_indices_count_ / 3);
+    DRACO_RETURN_IF_ERROR(AddAttributesToDracoMesh(&mb_));
+  } else {
+    pb_.Start(total_point_indices_count_);
+    DRACO_RETURN_IF_ERROR(AddAttributesToDracoMesh(&pb_));
+  }
 
   for (const tinygltf::Scene &scene : gltf_model_.scenes) {
     for (int i = 0; i < scene.nodes.size(); ++i) {
@@ -464,11 +546,43 @@ StatusOr<std::unique_ptr<Mesh>> GltfDecoder::BuildMesh() {
       DRACO_RETURN_IF_ERROR(DecodeNode(scene.nodes[i], parent_matrix));
     }
   }
-  std::unique_ptr<Mesh> mesh = mb_.Finalize();
+  DRACO_ASSIGN_OR_RETURN(
+      std::unique_ptr<Mesh> mesh,
+      BuildMeshFromBuilder(total_face_indices_count_ > 0, &mb_, &pb_));
 
   DRACO_RETURN_IF_ERROR(CopyTextures<Mesh>(mesh.get()));
+  SetAttributePropertiesOnDracoMesh(mesh.get());
   DRACO_RETURN_IF_ERROR(AddMaterialsToDracoMesh(mesh.get()));
+  DRACO_RETURN_IF_ERROR(AddMeshFeaturesToDracoMesh(mesh.get()));
+  DRACO_RETURN_IF_ERROR(AddStructuralMetadataToGeometry(mesh.get()));
+  MoveNonMaterialTextures(mesh.get());
   return mesh;
+}
+
+Status GltfDecoder::AddMeshFeaturesToDracoMesh(Mesh *mesh) {
+  for (const tinygltf::Scene &scene : gltf_model_.scenes) {
+    for (int i = 0; i < scene.nodes.size(); ++i) {
+      DRACO_RETURN_IF_ERROR(AddMeshFeaturesToDracoMesh(scene.nodes[i], mesh));
+    }
+  }
+  return OkStatus();
+}
+
+Status GltfDecoder::AddMeshFeaturesToDracoMesh(int node_index, Mesh *mesh) {
+  const tinygltf::Node &node = gltf_model_.nodes[node_index];
+  if (node.mesh >= 0) {
+    const tinygltf::Mesh &gltf_mesh = gltf_model_.meshes[node.mesh];
+    for (const auto &primitive : gltf_mesh.primitives) {
+      // Decode mesh feature ID sets if present in this primitive.
+      DRACO_RETURN_IF_ERROR(DecodeMeshFeatures(
+          primitive, &mesh->GetMaterialLibrary().MutableTextureLibrary(),
+          mesh));
+    }
+  }
+  for (int i = 0; i < node.children.size(); ++i) {
+    DRACO_RETURN_IF_ERROR(AddMeshFeaturesToDracoMesh(node.children[i], mesh));
+  }
+  return OkStatus();
 }
 
 Status GltfDecoder::CheckUnsupportedFeatures() {
@@ -571,8 +685,10 @@ StatusOr<std::vector<uint32_t>> GltfDecoder::DecodePrimitiveIndices(
 
 Status GltfDecoder::DecodePrimitive(const tinygltf::Primitive &primitive,
                                     const Eigen::Matrix4d &transform_matrix) {
-  if (primitive.mode != TINYGLTF_MODE_TRIANGLES) {
-    return Status(Status::DRACO_ERROR, "Primitive does not contain triangles.");
+  if (primitive.mode != TINYGLTF_MODE_TRIANGLES &&
+      primitive.mode != TINYGLTF_MODE_POINTS) {
+    return Status(Status::DRACO_ERROR,
+                  "Primitive does not contain triangles or points.");
   }
 
   // Store the transformation scale of this primitive loading as draco::Mesh.
@@ -586,6 +702,7 @@ Status GltfDecoder::DecodePrimitive(const tinygltf::Primitive &primitive,
   DRACO_ASSIGN_OR_RETURN(const std::vector<uint32_t> indices_data,
                          DecodePrimitiveIndices(primitive));
   const int number_of_faces = indices_data.size() / 3;
+  const int number_of_points = indices_data.size();
 
   for (const auto &attribute : primitive.attributes) {
     const tinygltf::Accessor &accessor =
@@ -597,29 +714,14 @@ Status GltfDecoder::DecodePrimitive(const tinygltf::Primitive &primitive,
       continue;
     }
 
-    const bool reverse_winding = Determinant(transform_matrix) < 0;
-    if (attribute.first == "TEXCOORD_0" || attribute.first == "TEXCOORD_1") {
-      DRACO_RETURN_IF_ERROR(AddTexCoordToMeshBuilder(accessor, indices_data,
-                                                     att_id, number_of_faces,
-                                                     reverse_winding, &mb_));
-    } else if (attribute.first == "TANGENT") {
-      const Eigen::Matrix4d matrix = UpdateMatrixForNormals(transform_matrix);
-      DRACO_RETURN_IF_ERROR(AddTangentToMeshBuilder(
-          accessor, indices_data, att_id, number_of_faces, matrix,
-          reverse_winding, &mb_));
-    } else if (attribute.first == "POSITION" || attribute.first == "NORMAL") {
-      const Eigen::Matrix4d matrix =
-          (attribute.first == "NORMAL")
-              ? UpdateMatrixForNormals(transform_matrix)
-              : transform_matrix;
-      const bool normalize = (attribute.first == "NORMAL");
-      DRACO_RETURN_IF_ERROR(AddTransformedDataToMeshBuilder(
-          accessor, indices_data, att_id, number_of_faces, matrix, normalize,
-          reverse_winding, &mb_));
+    if (primitive.mode == TINYGLTF_MODE_TRIANGLES) {
+      DRACO_RETURN_IF_ERROR(AddAttributeValuesToBuilder(
+          attribute.first, accessor, indices_data, att_id, number_of_faces,
+          transform_matrix, &mb_));
     } else {
-      DRACO_RETURN_IF_ERROR(AddAttributeDataByTypes(accessor, indices_data,
-                                                    att_id, number_of_faces,
-                                                    reverse_winding, &mb_));
+      DRACO_RETURN_IF_ERROR(AddAttributeValuesToBuilder(
+          attribute.first, accessor, indices_data, att_id, number_of_points,
+          transform_matrix, &pb_));
     }
   }
 
@@ -629,24 +731,18 @@ Status GltfDecoder::DecodePrimitive(const tinygltf::Primitive &primitive,
     const auto it =
         gltf_primitive_material_to_draco_material_.find(material_index);
     if (it != gltf_primitive_material_to_draco_material_.end()) {
-      if (gltf_primitive_material_to_draco_material_.size() < 256) {
-        const uint8_t material_value = it->second;
-        DRACO_RETURN_IF_ERROR(AddMaterialDataToMeshBuilder<uint8_t>(
-            material_value, number_of_faces));
-      } else if (gltf_primitive_material_to_draco_material_.size() <
-                 (1 << 16)) {
-        const uint16_t material_value = it->second;
-        DRACO_RETURN_IF_ERROR(AddMaterialDataToMeshBuilder<uint16_t>(
-            material_value, number_of_faces));
+      if (primitive.mode == TINYGLTF_MODE_TRIANGLES) {
+        DRACO_RETURN_IF_ERROR(
+            AddMaterialDataToBuilder(it->second, number_of_faces, &mb_));
       } else {
-        const uint32_t material_value = it->second;
-        DRACO_RETURN_IF_ERROR(AddMaterialDataToMeshBuilder<uint32_t>(
-            material_value, number_of_faces));
+        DRACO_RETURN_IF_ERROR(
+            AddMaterialDataToBuilder(it->second, number_of_points, &pb_));
       }
     }
   }
 
   next_face_id_ += number_of_faces;
+  next_point_id_ += number_of_points;
   return OkStatus();
 }
 
@@ -685,32 +781,38 @@ Status GltfDecoder::GatherAttributeAndMaterialStats() {
 
 void GltfDecoder::SumAttributeStats(const std::string &attribute_name,
                                     int count) {
-  const auto it = total_attribute_counts_.find(attribute_name);
-  if (it == total_attribute_counts_.end()) {
-    total_attribute_counts_[attribute_name] = count;
-  } else {
-    total_attribute_counts_[attribute_name] += count;
-  }
+  // We know that there must be a valid entry for |attribute_name| at this time.
+  mesh_attribute_data_[attribute_name].total_attribute_counts += count;
 }
 
 Status GltfDecoder::CheckTypes(const std::string &attribute_name,
-                               int component_type, int type) {
-  const auto it_ct = attribute_component_type_.find(attribute_name);
-  if (it_ct == attribute_component_type_.end()) {
-    attribute_component_type_[attribute_name] = component_type;
-  } else if (attribute_component_type_[attribute_name] != component_type) {
+                               int component_type, int type, bool normalized) {
+  auto it_mad = mesh_attribute_data_.find(attribute_name);
+
+  if (it_mad == mesh_attribute_data_.end()) {
+    MeshAttributeData mad;
+    mad.component_type = component_type;
+    mad.attribute_type = type;
+    mad.normalized = normalized;
+    mesh_attribute_data_[attribute_name] = mad;
+    return OkStatus();
+  }
+  if (it_mad->second.component_type != component_type) {
     return Status(
         Status::DRACO_ERROR,
         attribute_name + " attribute component type does not match previous.");
   }
-
-  const auto it_t = attribute_type_.find(attribute_name);
-  if (it_t == attribute_type_.end()) {
-    attribute_type_[attribute_name] = type;
-  } else if (attribute_type_[attribute_name] != type) {
+  if (it_mad->second.attribute_type != type) {
     return Status(Status::DRACO_ERROR,
                   attribute_name + " attribute type does not match previous.");
   }
+  if (it_mad->second.normalized != normalized) {
+    return Status(
+        Status::DRACO_ERROR,
+        attribute_name +
+            " attribute normalized property does not match previous.");
+  }
+
   return OkStatus();
 }
 
@@ -718,21 +820,31 @@ Status GltfDecoder::AccumulatePrimitiveStats(
     const tinygltf::Primitive &primitive) {
   DRACO_ASSIGN_OR_RETURN(const int indices_count,
                          DecodePrimitiveIndicesCount(primitive));
-  total_indices_count_ += indices_count;
+  if (primitive.mode == TINYGLTF_MODE_TRIANGLES) {
+    total_face_indices_count_ += indices_count;
+  } else if (primitive.mode == TINYGLTF_MODE_POINTS) {
+    total_point_indices_count_ += indices_count;
+  } else {
+    return ErrorStatus("Unsupported primitive indices mode.");
+  }
 
   for (const auto &attribute : primitive.attributes) {
+    if (attribute.second >= gltf_model_.accessors.size()) {
+      return ErrorStatus("Invalid accessor.");
+    }
     const tinygltf::Accessor &accessor =
         gltf_model_.accessors[attribute.second];
 
-    DRACO_RETURN_IF_ERROR(
-        CheckTypes(attribute.first, accessor.componentType, accessor.type));
+    DRACO_RETURN_IF_ERROR(CheckTypes(attribute.first, accessor.componentType,
+                                     accessor.type, accessor.normalized));
     SumAttributeStats(attribute.first, accessor.count);
   }
   return OkStatus();
 }
 
-Status GltfDecoder::AddAttributesToDracoMesh() {
-  for (const auto &attribute : total_attribute_counts_) {
+template <typename BuilderT>
+Status GltfDecoder::AddAttributesToDracoMesh(BuilderT *builder) {
+  for (const auto &attribute : mesh_attribute_data_) {
     const GeometryAttribute::Type draco_att_type =
         GltfAttributeToDracoAttribute(attribute.first);
     if (draco_att_type == GeometryAttribute::INVALID) {
@@ -743,8 +855,8 @@ Status GltfDecoder::AddAttributesToDracoMesh() {
     }
     DRACO_ASSIGN_OR_RETURN(
         const int att_id,
-        AddAttribute(draco_att_type, attribute_component_type_[attribute.first],
-                     attribute_type_[attribute.first], &mb_));
+        AddAttribute(draco_att_type, attribute.second.component_type,
+                     attribute.second.attribute_type, builder));
     attribute_name_to_draco_mesh_attribute_id_[attribute.first] = att_id;
   }
 
@@ -757,17 +869,54 @@ Status GltfDecoder::AddAttributesToDracoMesh() {
       component_type = DT_UINT16;
     }
     material_att_id_ =
-        mb_.AddAttribute(GeometryAttribute::MATERIAL, 1, component_type);
+        builder->AddAttribute(GeometryAttribute::MATERIAL, 1, component_type);
   }
 
   return OkStatus();
 }
 
-Status GltfDecoder::AddTangentToMeshBuilder(
+template <typename BuilderT>
+Status GltfDecoder::AddAttributeValuesToBuilder(
+    const std::string &attribute_name, const tinygltf::Accessor &accessor,
+    const std::vector<uint32_t> &indices_data, int att_id,
+    int number_of_elements, const Eigen::Matrix4d &transform_matrix,
+    BuilderT *builder) {
+  const bool reverse_winding = Determinant(transform_matrix) < 0;
+  if (attribute_name == "TEXCOORD_0" || attribute_name == "TEXCOORD_1") {
+    DRACO_RETURN_IF_ERROR(AddTexCoordToBuilder(accessor, indices_data, att_id,
+                                               number_of_elements,
+                                               reverse_winding, builder));
+  } else if (attribute_name == "TANGENT") {
+    const Eigen::Matrix4d matrix = UpdateMatrixForNormals(transform_matrix);
+    DRACO_RETURN_IF_ERROR(AddTangentToBuilder(accessor, indices_data, att_id,
+                                              number_of_elements, matrix,
+                                              reverse_winding, builder));
+  } else if (attribute_name == "POSITION" || attribute_name == "NORMAL") {
+    const Eigen::Matrix4d matrix =
+        (attribute_name == "NORMAL") ? UpdateMatrixForNormals(transform_matrix)
+                                     : transform_matrix;
+    const bool normalize = (attribute_name == "NORMAL");
+    DRACO_RETURN_IF_ERROR(AddTransformedDataToBuilder(
+        accessor, indices_data, att_id, number_of_elements, matrix, normalize,
+        reverse_winding, builder));
+  } else if (attribute_name.rfind("_FEATURE_ID_") == 0) {
+    DRACO_RETURN_IF_ERROR(AddFeatureIdToBuilder(
+        accessor, indices_data, att_id, number_of_elements, reverse_winding,
+        attribute_name, builder));
+  } else {
+    DRACO_RETURN_IF_ERROR(AddAttributeDataByTypes(accessor, indices_data,
+                                                  att_id, number_of_elements,
+                                                  reverse_winding, builder));
+  }
+  return OkStatus();
+}
+
+template <typename BuilderT>
+Status GltfDecoder::AddTangentToBuilder(
     const tinygltf::Accessor &accessor,
-    const std::vector<uint32_t> &indices_data, int att_id, int number_of_faces,
-    const Eigen::Matrix4d &transform_matrix, bool reverse_winding,
-    TriangleSoupMeshBuilder *mb) {
+    const std::vector<uint32_t> &indices_data, int att_id,
+    int number_of_elements, const Eigen::Matrix4d &transform_matrix,
+    bool reverse_winding, BuilderT *builder) {
   DRACO_ASSIGN_OR_RETURN(
       std::vector<Vector4f> data,
       TinyGltfUtils::CopyDataAsFloat<Vector4f>(gltf_model_, accessor));
@@ -790,15 +939,16 @@ Status GltfDecoder::AddTangentToMeshBuilder(
     }
   }
 
-  SetValuesPerFace<Vector4f>(indices_data, att_id, number_of_faces, data,
-                             reverse_winding, mb);
+  SetValuesForBuilder<Vector4f>(indices_data, att_id, number_of_elements, data,
+                                reverse_winding, builder);
   return OkStatus();
 }
 
-Status GltfDecoder::AddTexCoordToMeshBuilder(
+template <typename BuilderT>
+Status GltfDecoder::AddTexCoordToBuilder(
     const tinygltf::Accessor &accessor,
-    const std::vector<uint32_t> &indices_data, int att_id, int number_of_faces,
-    bool reverse_winding, TriangleSoupMeshBuilder *mb) {
+    const std::vector<uint32_t> &indices_data, int att_id,
+    int number_of_elements, bool reverse_winding, BuilderT *builder) {
   DRACO_ASSIGN_OR_RETURN(
       std::vector<Vector2f> data,
       TinyGltfUtils::CopyDataAsFloat<Vector2f>(gltf_model_, accessor));
@@ -809,16 +959,49 @@ Status GltfDecoder::AddTexCoordToMeshBuilder(
     uv[1] = 1.0 - uv[1];
   }
 
-  SetValuesPerFace<Vector2f>(indices_data, att_id, number_of_faces, data,
-                             reverse_winding, mb);
+  SetValuesForBuilder<Vector2f>(indices_data, att_id, number_of_elements, data,
+                                reverse_winding, builder);
   return OkStatus();
 }
 
-Status GltfDecoder::AddTransformedDataToMeshBuilder(
+template <typename BuilderT>
+Status GltfDecoder::AddFeatureIdToBuilder(
     const tinygltf::Accessor &accessor,
-    const std::vector<uint32_t> &indices_data, int att_id, int number_of_faces,
-    const Eigen::Matrix4d &transform_matrix, bool normalize,
-    bool reverse_winding, TriangleSoupMeshBuilder *mb) {
+    const std::vector<uint32_t> &indices_data, int att_id,
+    int number_of_elements, bool reverse_winding,
+    const std::string &attribute_name, BuilderT *builder) {
+  // Check that the feature ID attribute has correct type.
+  const int num_components =
+      TinyGltfUtils::GetNumComponentsForType(accessor.type);
+  if (num_components != 1) {
+    return ErrorStatus("Invalid feature ID attribute type.");
+  }
+  const draco::DataType draco_component_type =
+      GltfComponentTypeToDracoType(accessor.componentType);
+  if (draco_component_type != DT_UINT8 && draco_component_type != DT_UINT16 &&
+      draco_component_type != DT_FLOAT32) {
+    return ErrorStatus("Invalid feature ID attribute component type.");
+  }
+
+  // Set feature ID attribute values to mesh faces.
+  DRACO_RETURN_IF_ERROR(AddAttributeDataByTypes(accessor, indices_data, att_id,
+                                                number_of_elements,
+                                                reverse_winding, builder));
+
+  // Store feature ID attribute name with index like _FEATURE_ID_5 in Draco
+  // attribute metadata.
+  std::unique_ptr<AttributeMetadata> metadata(new draco::AttributeMetadata());
+  metadata->AddEntryString("attribute_name", attribute_name);
+  builder->AddAttributeMetadata(att_id, std::move(metadata));
+  return OkStatus();
+}
+
+template <typename BuilderT>
+Status GltfDecoder::AddTransformedDataToBuilder(
+    const tinygltf::Accessor &accessor,
+    const std::vector<uint32_t> &indices_data, int att_id,
+    int number_of_elements, const Eigen::Matrix4d &transform_matrix,
+    bool normalize, bool reverse_winding, BuilderT *builder) {
   DRACO_ASSIGN_OR_RETURN(
       std::vector<Vector3f> data,
       TinyGltfUtils::CopyDataAsFloat<Vector3f>(gltf_model_, accessor));
@@ -835,9 +1018,33 @@ Status GltfDecoder::AddTransformedDataToMeshBuilder(
     }
   }
 
-  SetValuesPerFace<Vector3f>(indices_data, att_id, number_of_faces, data,
-                             reverse_winding, mb);
+  SetValuesForBuilder<Vector3f>(indices_data, att_id, number_of_elements, data,
+                                reverse_winding, builder);
   return OkStatus();
+}
+
+template <typename T>
+void GltfDecoder::SetValuesForBuilder(const std::vector<uint32_t> &indices_data,
+                                      int att_id, int number_of_elements,
+                                      const std::vector<T> &data,
+                                      bool reverse_winding,
+                                      TriangleSoupMeshBuilder *builder) {
+  SetValuesPerFace(indices_data, att_id, number_of_elements, data,
+                   reverse_winding, builder);
+}
+
+template <typename T>
+void GltfDecoder::SetValuesForBuilder(const std::vector<uint32_t> &indices_data,
+                                      int att_id, int number_of_elements,
+                                      const std::vector<T> &data,
+                                      bool reverse_winding,
+                                      PointCloudBuilder *builder) {
+  for (int i = 0; i < number_of_elements; ++i) {
+    const uint32_t v_id = indices_data[i];
+    const PointIndex pi(v_id + next_point_id_);
+    builder->SetAttributeValueForPoint(att_id, pi,
+                                       GetDataContentAddress(data[v_id]));
+  }
 }
 
 template <typename T>
@@ -855,16 +1062,37 @@ void GltfDecoder::SetValuesPerFace(const std::vector<uint32_t> &indices_data,
     const uint32_t v_prev_id = indices_data[base_corner + prev_offset];
 
     const FaceIndex face_index(f + next_face_id_);
-    mb->SetAttributeValuesForFace(att_id, face_index, data[v_id].data(),
-                                  data[v_next_id].data(),
-                                  data[v_prev_id].data());
+    mb->SetAttributeValuesForFace(att_id, face_index,
+                                  GetDataContentAddress(data[v_id]),
+                                  GetDataContentAddress(data[v_next_id]),
+                                  GetDataContentAddress(data[v_prev_id]));
   }
 }
 
+// Get the address of data content for arithmetic types |T|.
+template <typename T>
+const void *GetDataContentAddressImpl(const T &data,
+                                      std::true_type /* is_arithmetic */) {
+  return &data;
+}
+
+// Get the address of data content for vector types |T|.
+template <typename T>
+const void *GetDataContentAddressImpl(const T &data,
+                                      std::false_type /* is_arithmetic */) {
+  return data.data();
+}
+
+template <typename T>
+const void *GltfDecoder::GetDataContentAddress(const T &data) const {
+  return GetDataContentAddressImpl(data, std::is_arithmetic<T>());
+}
+
+template <typename BuilderT>
 Status GltfDecoder::AddAttributeDataByTypes(
     const tinygltf::Accessor &accessor,
-    const std::vector<uint32_t> &indices_data, int att_id, int number_of_faces,
-    bool reverse_winding, TriangleSoupMeshBuilder *mb) {
+    const std::vector<uint32_t> &indices_data, int att_id,
+    int number_of_elements, bool reverse_winding, BuilderT *builder) {
   typedef VectorD<uint8_t, 2> Vector2u8i;
   typedef VectorD<uint8_t, 3> Vector3u8i;
   typedef VectorD<uint8_t, 4> Vector4u8i;
@@ -874,27 +1102,62 @@ Status GltfDecoder::AddAttributeDataByTypes(
   typedef VectorD<uint16_t, 3> Vector3u16i;
   typedef VectorD<uint16_t, 4> Vector4u16i;
   switch (accessor.type) {
+    case TINYGLTF_TYPE_SCALAR:
+      switch (accessor.componentType) {
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
+          DRACO_ASSIGN_OR_RETURN(std::vector<uint8_t> data,
+                                 CopyDataAs<uint8_t>(gltf_model_, accessor));
+          SetValuesForBuilder<uint8_t>(indices_data, att_id, number_of_elements,
+                                       data, reverse_winding, builder);
+        } break;
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+          DRACO_ASSIGN_OR_RETURN(std::vector<uint16_t> data,
+                                 CopyDataAs<uint16_t>(gltf_model_, accessor));
+          SetValuesForBuilder<uint16_t>(indices_data, att_id,
+                                        number_of_elements, data,
+                                        reverse_winding, builder);
+        } break;
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: {
+          DRACO_ASSIGN_OR_RETURN(std::vector<uint32_t> data,
+                                 CopyDataAs<uint32_t>(gltf_model_, accessor));
+          SetValuesForBuilder<uint32_t>(indices_data, att_id,
+                                        number_of_elements, data,
+                                        reverse_winding, builder);
+        } break;
+        case TINYGLTF_COMPONENT_TYPE_FLOAT: {
+          DRACO_ASSIGN_OR_RETURN(std::vector<float> data,
+                                 CopyDataAs<float>(gltf_model_, accessor));
+          SetValuesForBuilder<float>(indices_data, att_id, number_of_elements,
+                                     data, reverse_winding, builder);
+        } break;
+        default:
+          return ErrorStatus("Add attribute data, unknown component type.");
+      }
+      break;
     case TINYGLTF_TYPE_VEC2:
       switch (accessor.componentType) {
         case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
           DRACO_ASSIGN_OR_RETURN(std::vector<Vector2u8i> data,
                                  CopyDataAs<Vector2u8i>(gltf_model_, accessor));
-          SetValuesPerFace<Vector2u8i>(indices_data, att_id, number_of_faces,
-                                       data, reverse_winding, mb);
+          SetValuesForBuilder<Vector2u8i>(indices_data, att_id,
+                                          number_of_elements, data,
+                                          reverse_winding, builder);
         } break;
         case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
           DRACO_ASSIGN_OR_RETURN(
               std::vector<Vector2u16i> data,
               CopyDataAs<Vector2u16i>(gltf_model_, accessor));
-          SetValuesPerFace<Vector2u16i>(indices_data, att_id, number_of_faces,
-                                        data, reverse_winding, mb);
+          SetValuesForBuilder<Vector2u16i>(indices_data, att_id,
+                                           number_of_elements, data,
+                                           reverse_winding, builder);
         } break;
         case TINYGLTF_COMPONENT_TYPE_FLOAT: {
           DRACO_ASSIGN_OR_RETURN(
               std::vector<Vector2f> data,
               TinyGltfUtils::CopyDataAsFloat<Vector2f>(gltf_model_, accessor));
-          SetValuesPerFace<Vector2f>(indices_data, att_id, number_of_faces,
-                                     data, reverse_winding, mb);
+          SetValuesForBuilder<Vector2f>(indices_data, att_id,
+                                        number_of_elements, data,
+                                        reverse_winding, builder);
         } break;
         default:
           return Status(Status::DRACO_ERROR,
@@ -906,22 +1169,25 @@ Status GltfDecoder::AddAttributeDataByTypes(
         case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
           DRACO_ASSIGN_OR_RETURN(std::vector<Vector3u8i> data,
                                  CopyDataAs<Vector3u8i>(gltf_model_, accessor));
-          SetValuesPerFace<Vector3u8i>(indices_data, att_id, number_of_faces,
-                                       data, reverse_winding, mb);
+          SetValuesForBuilder<Vector3u8i>(indices_data, att_id,
+                                          number_of_elements, data,
+                                          reverse_winding, builder);
         } break;
         case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
           DRACO_ASSIGN_OR_RETURN(
               std::vector<Vector3u16i> data,
               CopyDataAs<Vector3u16i>(gltf_model_, accessor));
-          SetValuesPerFace<Vector3u16i>(indices_data, att_id, number_of_faces,
-                                        data, reverse_winding, mb);
+          SetValuesForBuilder<Vector3u16i>(indices_data, att_id,
+                                           number_of_elements, data,
+                                           reverse_winding, builder);
         } break;
         case TINYGLTF_COMPONENT_TYPE_FLOAT: {
           DRACO_ASSIGN_OR_RETURN(
               std::vector<Vector3f> data,
               TinyGltfUtils::CopyDataAsFloat<Vector3f>(gltf_model_, accessor));
-          SetValuesPerFace<Vector3f>(indices_data, att_id, number_of_faces,
-                                     data, reverse_winding, mb);
+          SetValuesForBuilder<Vector3f>(indices_data, att_id,
+                                        number_of_elements, data,
+                                        reverse_winding, builder);
         } break;
         default:
           return Status(Status::DRACO_ERROR,
@@ -933,22 +1199,25 @@ Status GltfDecoder::AddAttributeDataByTypes(
         case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
           DRACO_ASSIGN_OR_RETURN(std::vector<Vector4u8i> data,
                                  CopyDataAs<Vector4u8i>(gltf_model_, accessor));
-          SetValuesPerFace<Vector4u8i>(indices_data, att_id, number_of_faces,
-                                       data, reverse_winding, mb);
+          SetValuesForBuilder<Vector4u8i>(indices_data, att_id,
+                                          number_of_elements, data,
+                                          reverse_winding, builder);
         } break;
         case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
           DRACO_ASSIGN_OR_RETURN(
               std::vector<Vector4u16i> data,
               CopyDataAs<Vector4u16i>(gltf_model_, accessor));
-          SetValuesPerFace<Vector4u16i>(indices_data, att_id, number_of_faces,
-                                        data, reverse_winding, mb);
+          SetValuesForBuilder<Vector4u16i>(indices_data, att_id,
+                                           number_of_elements, data,
+                                           reverse_winding, builder);
         } break;
         case TINYGLTF_COMPONENT_TYPE_FLOAT: {
           DRACO_ASSIGN_OR_RETURN(
               std::vector<Vector4f> data,
               TinyGltfUtils::CopyDataAsFloat<Vector4f>(gltf_model_, accessor));
-          SetValuesPerFace<Vector4f>(indices_data, att_id, number_of_faces,
-                                     data, reverse_winding, mb);
+          SetValuesForBuilder<Vector4f>(indices_data, att_id,
+                                        number_of_elements, data,
+                                        reverse_winding, builder);
         } break;
         default:
           return Status(Status::DRACO_ERROR,
@@ -970,7 +1239,6 @@ Status GltfDecoder::AddAttributeDataByTypes(
                         "Add attribute data, unknown component type.");
       }
       break;
-
     default:
       return Status(Status::DRACO_ERROR, "Add attribute data, unknown type.");
   }
@@ -986,6 +1254,7 @@ Status GltfDecoder::CopyTextures(T *owner) {
       // add an image with negative values.
       return Status(Status::DRACO_ERROR, "Error loading image.");
     }
+
     std::unique_ptr<Texture> draco_texture(new Texture());
 
     // Update mapping between glTF images and textures in the texture library.
@@ -1007,6 +1276,18 @@ Status GltfDecoder::CopyTextures(T *owner) {
         std::move(draco_texture));
   }
   return OkStatus();
+}
+
+void GltfDecoder::SetAttributePropertiesOnDracoMesh(Mesh *mesh) {
+  for (const auto &mad : mesh_attribute_data_) {
+    const int att_id = attribute_name_to_draco_mesh_attribute_id_[mad.first];
+    if (att_id == -1) {
+      continue;
+    }
+    if (mad.second.normalized) {
+      mesh->attribute(att_id)->set_normalized(true);
+    }
+  }
 }
 
 Status GltfDecoder::AddMaterialsToDracoMesh(Mesh *mesh) {
@@ -1041,13 +1322,44 @@ Status GltfDecoder::AddMaterialsToDracoMesh(Mesh *mesh) {
   return OkStatus();
 }
 
+template <typename BuilderT>
+Status GltfDecoder::AddMaterialDataToBuilder(int material_value,
+                                             int number_of_elements,
+                                             BuilderT *builder) {
+  if (gltf_primitive_material_to_draco_material_.size() < 256) {
+    const uint8_t typed_material_value = material_value;
+    DRACO_RETURN_IF_ERROR(AddMaterialDataToBuilderInternal<uint8_t>(
+        typed_material_value, number_of_elements, builder));
+  } else if (gltf_primitive_material_to_draco_material_.size() < (1 << 16)) {
+    const uint16_t typed_material_value = material_value;
+    DRACO_RETURN_IF_ERROR(AddMaterialDataToBuilderInternal<uint16_t>(
+        typed_material_value, number_of_elements, builder));
+  } else {
+    const uint32_t typed_material_value = material_value;
+    DRACO_RETURN_IF_ERROR(AddMaterialDataToBuilderInternal<uint32_t>(
+        typed_material_value, number_of_elements, builder));
+  }
+  return OkStatus();
+}
+
 template <typename T>
-Status GltfDecoder::AddMaterialDataToMeshBuilder(T material_value,
-                                                 int number_of_faces) {
+Status GltfDecoder::AddMaterialDataToBuilderInternal(
+    T material_value, int number_of_faces, TriangleSoupMeshBuilder *builder) {
   for (int f = 0; f < number_of_faces; ++f) {
     const FaceIndex face_index(f + next_face_id_);
-    mb_.SetPerFaceAttributeValueForFace(material_att_id_, face_index,
-                                        &material_value);
+    builder->SetPerFaceAttributeValueForFace(material_att_id_, face_index,
+                                             &material_value);
+  }
+  return OkStatus();
+}
+
+template <typename T>
+Status GltfDecoder::AddMaterialDataToBuilderInternal(
+    T material_value, int number_of_points, PointCloudBuilder *builder) {
+  for (int pi = 0; pi < number_of_points; ++pi) {
+    const PointIndex point_index(pi + next_point_id_);
+    builder->SetAttributeValueForPoint(material_att_id_, point_index,
+                                       &material_value);
   }
   return OkStatus();
 }
@@ -1061,8 +1373,9 @@ Status GltfDecoder::CheckAndAddTextureToDracoMaterial(
   }
 
   const tinygltf::Texture &input_texture = gltf_model_.textures[texture_index];
-  const auto texture_it =
-      gltf_image_to_draco_texture_.find(input_texture.source);
+  int source_index = input_texture.source;
+
+  const auto texture_it = gltf_image_to_draco_texture_.find(source_index);
   if (texture_it != gltf_image_to_draco_texture_.end()) {
     Texture *const texture = texture_it->second;
     // Default GLTF 2.0 sampler uses REPEAT mode along both S and T directions.
@@ -1104,6 +1417,9 @@ Status GltfDecoder::CheckAndAddTextureToDracoMaterial(
 Status GltfDecoder::DecodeGltfToScene() {
   DRACO_RETURN_IF_ERROR(GatherAttributeAndMaterialStats());
   DRACO_RETURN_IF_ERROR(AddLightsToScene());
+  DRACO_RETURN_IF_ERROR(AddMaterialsVariantsNamesToScene());
+  DRACO_RETURN_IF_ERROR(AddStructuralMetadataToGeometry(scene_.get()));
+  DRACO_RETURN_IF_ERROR(CopyTextures<Scene>(scene_.get()));
   for (const tinygltf::Scene &scene : gltf_model_.scenes) {
     for (int i = 0; i < scene.nodes.size(); ++i) {
       DRACO_RETURN_IF_ERROR(
@@ -1113,9 +1429,9 @@ Status GltfDecoder::DecodeGltfToScene() {
   }
 
   DRACO_RETURN_IF_ERROR(AddAnimationsToScene());
-  DRACO_RETURN_IF_ERROR(CopyTextures<Scene>(scene_.get()));
   DRACO_RETURN_IF_ERROR(AddMaterialsToScene());
   DRACO_RETURN_IF_ERROR(AddSkinsToScene());
+  MoveNonMaterialTextures(scene_.get());
 
   return OkStatus();
 }
@@ -1158,6 +1474,225 @@ Status GltfDecoder::AddLightsToScene() {
         return ErrorStatus("Light range must be positive.");
       }
       scene_light->SetRange(light.range);
+    }
+  }
+  return OkStatus();
+}
+
+Status GltfDecoder::AddMaterialsVariantsNamesToScene() {
+  // Check whether the scene has materials variants.
+  const auto &e = gltf_model_.extensions.find("KHR_materials_variants");
+  if (e == gltf_model_.extensions.end()) {
+    // The scene has no materials variants.
+    return OkStatus();
+  }
+
+  // Decode all materials variants names into Draco scene from JSON like this:
+  //   "KHR_materials_variants": {
+  //     "variants": [
+  //       {"name": "Loki" },
+  //       {"name": "Odin" },
+  //     ]
+  //   }
+  const tinygltf::Value::Object &o = e->second.Get<tinygltf::Value::Object>();
+  const auto &variants = o.find("variants");
+  if (variants == o.end()) {
+    return ErrorStatus("Materials variants extension with names is malformed.");
+  }
+  const tinygltf::Value &variants_array = variants->second;
+  if (!variants_array.IsArray()) {
+    return ErrorStatus("Materials variants names array is malformed.");
+  }
+  for (int i = 0; i < variants_array.Size(); i++) {
+    const auto &variant_object = variants_array.Get(i);
+    if (!variant_object.IsObject() || !variant_object.Has("name")) {
+      return ErrorStatus("Materials variants name is missing.");
+    }
+    const auto &name_string = variant_object.Get("name");
+    if (!name_string.IsString()) {
+      return ErrorStatus("Materials variant name is malformed.");
+    }
+    const std::string &name = name_string.Get<std::string>();
+    scene_->GetMaterialLibrary().AddMaterialsVariant(name);
+  }
+  return OkStatus();
+}
+
+template <typename GeometryT>
+Status GltfDecoder::AddStructuralMetadataToGeometry(GeometryT *geometry) {
+  // Check whether the glTF model has structural metadata.
+  const auto &e = gltf_model_.extensions.find("EXT_structural_metadata");
+  if (e == gltf_model_.extensions.end()) {
+    // The glTF model has no structural metadata.
+    return OkStatus();
+  }
+  const tinygltf::Value::Object &o = e->second.Get<tinygltf::Value::Object>();
+
+  // Decode property table schema.
+  {
+    const auto &value = o.find("schema");
+    if (value == o.end()) {
+      return ErrorStatus("Structural metadata extension has no schema.");
+    }
+    const tinygltf::Value &object = value->second;
+    if (!object.IsObject()) {
+      return ErrorStatus("Structural metadata extension schema is malformed.");
+    }
+
+    // Decodes tinygltf::Value into PropertyTable::Schema::Object.
+    struct SchemaParser {
+      static Status Parse(const tinygltf::Value &value,
+                          PropertyTable::Schema::Object *object) {
+        switch (value.Type()) {
+          case tinygltf::OBJECT_TYPE: {
+            for (auto &it : value.Get<tinygltf::Value::Object>()) {
+              object->SetObjects().emplace_back(it.first);
+              DRACO_RETURN_IF_ERROR(
+                  Parse(it.second, &object->SetObjects().back()));
+            }
+          } break;
+          case tinygltf::ARRAY_TYPE: {
+            for (int i = 0; i < value.ArrayLen(); ++i) {
+              object->SetArray().emplace_back();
+              DRACO_RETURN_IF_ERROR(
+                  Parse(value.Get(i), &object->SetArray().back()));
+            }
+          } break;
+          case tinygltf::STRING_TYPE:
+            object->SetString(value.Get<std::string>());
+            break;
+          case tinygltf::INT_TYPE:
+            object->SetInteger(value.Get<int>());
+            break;
+          case tinygltf::BOOL_TYPE:
+            object->SetBoolean(value.Get<bool>());
+            break;
+          case tinygltf::REAL_TYPE:
+          case tinygltf::BINARY_TYPE:
+          case tinygltf::NULL_TYPE:
+          default:
+            // Not used in the schema JSON.
+            return ErrorStatus("Unsupported JSON type in schema.");
+        }
+        return OkStatus();
+      }
+    };
+
+    // Parse property table schema and set it to |geometry|.
+    PropertyTable::Schema schema;
+    DRACO_RETURN_IF_ERROR(SchemaParser::Parse(object, &schema.json));
+    geometry->GetStructuralMetadata().SetPropertyTableSchema(schema);
+  }
+
+  // Decode property tables.
+  {
+    const auto &tables = o.find("propertyTables");
+    if (tables == o.end()) {
+      return ErrorStatus(
+          "Structural metadata extension has no property tables.");
+    }
+    const tinygltf::Value &tables_array = tables->second;
+    if (!tables_array.IsArray()) {
+      return ErrorStatus("Property tables array is malformed.");
+    }
+
+    // Loop over all property tables.
+    for (int i = 0; i < tables_array.Size(); i++) {
+      // Create a property table and populate it below.
+      std::unique_ptr<PropertyTable> property_table(new PropertyTable());
+
+      const auto &object = tables_array.Get(i);
+      if (!object.IsObject()) {
+        return ErrorStatus("Property table is malformed.");
+      }
+      const auto o = object.Get<tinygltf::Value::Object>();
+
+      // The "class" property is required.
+      bool success;
+      std::string str_value;
+      DRACO_ASSIGN_OR_RETURN(success, DecodeString("class", o, &str_value));
+      if (success) {
+        property_table->SetClass(str_value);
+      } else {
+        return ErrorStatus("Property class is malformed.");
+      }
+
+      // The "count" property is required.
+      int int_value;
+      DRACO_ASSIGN_OR_RETURN(success, DecodeInt("count", o, &int_value));
+      if (success) {
+        property_table->SetCount(int_value);
+      } else {
+        return ErrorStatus("Property count is malformed.");
+      }
+
+      // The "name" property is optional.
+      DRACO_ASSIGN_OR_RETURN(success, DecodeString("name", o, &str_value));
+      if (success) {
+        property_table->SetName(str_value);
+      }
+
+      // Decode property table properties (columns).
+      {
+        constexpr char kName[] = "properties";
+        if (!object.Has(kName)) {
+          return ErrorStatus("Property table is malformed.");
+        }
+        const tinygltf::Value &value = object.Get(kName);
+        if (!value.IsObject()) {
+          return ErrorStatus(
+              "Property table properties property is malformed.");
+        }
+
+        // Loop over property table properties.
+        for (const auto &key : value.Keys()) {
+          // Create a property table property and populate it below.
+          std::unique_ptr<PropertyTable::Property> property(
+              new PropertyTable::Property());
+
+          const auto &property_object = value.Get(key);
+          if (!property_object.IsObject()) {
+            return ErrorStatus("Property entry is malformed.");
+          }
+          property->SetName(key);
+          const auto o = property_object.Get<tinygltf::Value::Object>();
+
+          // The "values" property is required.
+          DRACO_ASSIGN_OR_RETURN(
+              success,
+              DecodePropertyTableData("values", o, &property->GetData()));
+          if (!success) {
+            return ErrorStatus("Property values property is malformed.");
+          }
+
+          // All other properties are not required.
+          DRACO_ASSIGN_OR_RETURN(
+              success, DecodeString("stringOffsetType", o, &str_value));
+          if (success) {
+            property->GetStringOffsets().type = str_value;
+          }
+          DRACO_ASSIGN_OR_RETURN(
+              success, DecodeString("arrayOffsetType", o, &str_value));
+          if (success) {
+            property->GetArrayOffsets().type = str_value;
+          }
+          DRACO_ASSIGN_OR_RETURN(
+              success,
+              DecodePropertyTableData("arrayOffsets", o,
+                                      &property->GetArrayOffsets().data));
+          DRACO_ASSIGN_OR_RETURN(
+              success,
+              DecodePropertyTableData("stringOffsets", o,
+                                      &property->GetStringOffsets().data));
+
+          // Add property to the property table.
+          property_table->AddProperty(std::move(property));
+        }
+      }
+
+      // Add property table to structural metadata.
+      geometry->GetStructuralMetadata().AddPropertyTable(
+          std::move(property_table));
     }
   }
   return OkStatus();
@@ -1273,16 +1808,26 @@ Status GltfDecoder::DecodeNodeForScene(int node_index,
 
 Status GltfDecoder::DecodePrimitiveForScene(
     const tinygltf::Primitive &primitive, MeshGroup *mesh_group) {
-  if (primitive.mode != TINYGLTF_MODE_TRIANGLES) {
-    return Status(Status::DRACO_ERROR, "Primitive does not contain triangles.");
+  if (primitive.mode != TINYGLTF_MODE_TRIANGLES &&
+      primitive.mode != TINYGLTF_MODE_POINTS) {
+    return Status(Status::DRACO_ERROR,
+                  "Primitive does not contain triangles or points.");
+  }
+
+  // Decode materials variants mappings if present in this primitive.
+  std::vector<MeshGroup::MaterialsVariantsMapping> mappings;
+  const auto &e = primitive.extensions.find("KHR_materials_variants");
+  if (e != primitive.extensions.end()) {
+    DRACO_RETURN_IF_ERROR(DecodeMaterialsVariantsMappings(
+        e->second.Get<tinygltf::Value::Object>(), &mappings));
   }
 
   const PrimitiveSignature signature(primitive);
-  const auto exisitng_mesh_index =
+  const auto existing_mesh_index =
       gltf_primitive_to_draco_mesh_index_.find(signature);
-  if (exisitng_mesh_index != gltf_primitive_to_draco_mesh_index_.end()) {
-    mesh_group->AddMeshIndex(exisitng_mesh_index->second);
-    mesh_group->AddMaterialIndex(primitive.material);
+  if (existing_mesh_index != gltf_primitive_to_draco_mesh_index_.end()) {
+    mesh_group->AddMeshInstance(
+        {existing_mesh_index->second, primitive.material, mappings});
     return OkStatus();
   }
 
@@ -1290,80 +1835,321 @@ Status GltfDecoder::DecodePrimitiveForScene(
   DRACO_ASSIGN_OR_RETURN(const std::vector<uint32_t> indices_data,
                          DecodePrimitiveIndices(primitive));
   const int number_of_faces = indices_data.size() / 3;
+  const int number_of_points = indices_data.size();
 
   // Note that glTF mesh |primitive| has no name; no name is set to Draco mesh.
   TriangleSoupMeshBuilder mb;
-  mb.Start(number_of_faces);
+  PointCloudBuilder pb;
+  if (primitive.mode == TINYGLTF_MODE_TRIANGLES) {
+    mb.Start(number_of_faces);
+  } else {
+    pb.Start(number_of_points);
+  }
 
+  std::set<int32_t> normalized_attributes;
   for (const auto &attribute : primitive.attributes) {
+    if (attribute.second >= gltf_model_.accessors.size()) {
+      return ErrorStatus("Invalid accessor.");
+    }
     const tinygltf::Accessor &accessor =
         gltf_model_.accessors[attribute.second];
     const int component_type = accessor.componentType;
     const int type = accessor.type;
-    DRACO_ASSIGN_OR_RETURN(
-        const int att_id,
-        AddAttribute(attribute.first, component_type, type, &mb));
+    const bool normalized = accessor.normalized;
+    int att_id = -1;
+    if (primitive.mode == TINYGLTF_MODE_TRIANGLES) {
+      DRACO_ASSIGN_OR_RETURN(
+          att_id, AddAttribute(attribute.first, component_type, type, &mb));
+    } else {
+      DRACO_ASSIGN_OR_RETURN(
+          att_id, AddAttribute(attribute.first, component_type, type, &pb));
+    }
     if (att_id == -1) {
       continue;
     }
+    if (normalized) {
+      normalized_attributes.insert(att_id);
+    }
 
-    const bool reverse_winding = false;
-    if (attribute.first == "TEXCOORD_0" || attribute.first == "TEXCOORD_1") {
-      DRACO_RETURN_IF_ERROR(AddTexCoordToMeshBuilder(accessor, indices_data,
-                                                     att_id, number_of_faces,
-                                                     reverse_winding, &mb));
-    } else if (attribute.first == "TANGENT") {
-      const Eigen::Matrix4d matrix = Eigen::Matrix4d::Identity();
-      DRACO_RETURN_IF_ERROR(AddTangentToMeshBuilder(
-          accessor, indices_data, att_id, number_of_faces, matrix,
-          reverse_winding, &mb));
-    } else if (attribute.first == "POSITION" || attribute.first == "NORMAL") {
-      const Eigen::Matrix4d matrix = Eigen::Matrix4d::Identity();
-      const bool normalize = (attribute.first == "NORMAL");
-      DRACO_RETURN_IF_ERROR(AddTransformedDataToMeshBuilder(
-          accessor, indices_data, att_id, number_of_faces, matrix, normalize,
-          reverse_winding, &mb));
+    if (primitive.mode == TINYGLTF_MODE_TRIANGLES) {
+      DRACO_RETURN_IF_ERROR(AddAttributeValuesToBuilder(
+          attribute.first, accessor, indices_data, att_id, number_of_faces,
+          Eigen::Matrix4d::Identity(), &mb));
     } else {
-      DRACO_RETURN_IF_ERROR(AddAttributeDataByTypes(accessor, indices_data,
-                                                    att_id, number_of_faces,
-                                                    reverse_winding, &mb));
+      DRACO_RETURN_IF_ERROR(AddAttributeValuesToBuilder(
+          attribute.first, accessor, indices_data, att_id, number_of_points,
+          Eigen::Matrix4d::Identity(), &pb));
     }
   }
 
   int material_index = primitive.material;
 
-  std::unique_ptr<Mesh> mesh = mb.Finalize();
-  if (mesh == nullptr) {
-    return Status(Status::DRACO_ERROR, "Could not build Draco mesh.");
+  DRACO_ASSIGN_OR_RETURN(
+      std::unique_ptr<Mesh> mesh,
+      BuildMeshFromBuilder(primitive.mode == TINYGLTF_MODE_TRIANGLES, &mb,
+                           &pb));
+
+  // Set all normalized flags for appropriate attributes.
+  for (const int32_t att_id : normalized_attributes) {
+    mesh->attribute(att_id)->set_normalized(true);
   }
+  // Decode mesh feature ID sets if present in this primitive.
+  DRACO_RETURN_IF_ERROR(DecodeMeshFeatures(
+      primitive, &scene_->GetMaterialLibrary().MutableTextureLibrary(),
+      mesh.get()));
+
   const MeshIndex mesh_index = scene_->AddMesh(std::move(mesh));
   if (mesh_index == kInvalidMeshIndex) {
     return Status(Status::DRACO_ERROR, "Could not add Draco mesh to scene.");
   }
-  mesh_group->AddMeshIndex(mesh_index);
-  mesh_group->AddMaterialIndex(material_index);
+  mesh_group->AddMeshInstance({mesh_index, material_index, mappings});
 
   gltf_primitive_to_draco_mesh_index_[signature] = mesh_index;
   return OkStatus();
 }
 
+Status GltfDecoder::DecodeMaterialsVariantsMappings(
+    const tinygltf::Value::Object &extension,
+    std::vector<MeshGroup::MaterialsVariantsMapping> *mappings) {
+  // Decode all materials variants mappings from JSON like this:
+  //   "KHR_materials_variants" : {
+  //     "mappings": [
+  //       {
+  //         "material": 2,
+  //         "variants": [0, 2, 4]
+  //       },
+  //       {
+  //         "material": 3,
+  //         "variants": [1, 3]
+  //       }
+  //     ]
+  //   }
+  const auto &mappings_object = extension.find("mappings");
+  if (mappings_object == extension.end()) {
+    return ErrorStatus("Materials variants extension is malformed.");
+  }
+  const tinygltf::Value &mappings_array = mappings_object->second;
+  if (!mappings_array.IsArray()) {
+    return ErrorStatus("Materials variants mappings array is malformed.");
+  }
+  for (int i = 0; i < mappings_array.Size(); i++) {
+    const auto &mapping_object = mappings_array.Get(i);
+    if (!mapping_object.IsObject() || !mapping_object.Has("material") ||
+        !mapping_object.Has("variants")) {
+      return ErrorStatus("Materials variants mapping is malformed.");
+    }
+    const tinygltf::Value &material_int = mapping_object.Get("material");
+    if (!material_int.IsInt()) {
+      return ErrorStatus("Materials variant mapping material is malformed.");
+    }
+    const int material = material_int.Get<int>();
+    const tinygltf::Value &variants_array = mapping_object.Get("variants");
+    if (!variants_array.IsArray()) {
+      return ErrorStatus("Materials variant mapping variants is malformed.");
+    }
+    std::vector<int> variants;
+    for (int j = 0; j < variants_array.Size(); j++) {
+      const tinygltf::Value &variant_int = variants_array.Get(j);
+      if (!variant_int.IsInt()) {
+        return ErrorStatus("Materials variants mapping variant is malformed.");
+      }
+      variants.push_back(variant_int.Get<int>());
+    }
+    mappings->push_back({material, variants});
+  }
+  return OkStatus();
+}
+
+Status GltfDecoder::DecodeMeshFeatures(const tinygltf::Primitive &primitive,
+                                       TextureLibrary *texture_library,
+                                       Mesh *mesh) {
+  const auto &e = primitive.extensions.find("EXT_mesh_features");
+  if (e == primitive.extensions.end()) {
+    return OkStatus();
+  }
+  std::vector<std::unique_ptr<MeshFeatures>> mesh_features;
+  DRACO_RETURN_IF_ERROR(
+      DecodeMeshFeatures(e->second.Get<tinygltf::Value::Object>(),
+                         texture_library, &mesh_features));
+  for (int i = 0; i < mesh_features.size(); i++) {
+    const MeshFeaturesIndex mfi =
+        mesh->AddMeshFeatures(std::move(mesh_features[i]));
+    if (scene_ == nullptr) {
+      // If we are decoding to a mesh, we need to restrict the mesh features to
+      // the primitive's material.
+      // TODO(ostava): This will not work properly when two primitives share the
+      // same material but have different mesh features. We will need to
+      // duplicate the materials in this case.
+      const auto mat_it =
+          gltf_primitive_material_to_draco_material_.find(primitive.material);
+      if (mat_it != gltf_primitive_material_to_draco_material_.end()) {
+        mesh->AddMeshFeaturesMaterialMask(mfi, mat_it->second);
+      }
+    }
+  }
+  return OkStatus();
+}
+
+Status GltfDecoder::DecodeMeshFeatures(
+    const tinygltf::Value::Object &extension, TextureLibrary *texture_library,
+    std::vector<std::unique_ptr<MeshFeatures>> *mesh_features) {
+  // Decode all mesh feature ID sets from JSON like this:
+  //   "EXT_mesh_features": {
+  //     "featureIds": [
+  //       {
+  //         "label": "water",
+  //         "featureCount": 2,
+  //         "propertyTable": 0,
+  //         "attribute": 0
+  //       },
+  //       {
+  //         "featureCount": 12,
+  //         "nullFeatureId": 100,
+  //         "texture" : {
+  //           "index": 0,
+  //           "texCoord": 0,
+  //           "channels": [0, 1, 2, 3]
+  //         }
+  //       }
+  //     ]
+  //   }
+  const auto &object = extension.find("featureIds");
+  if (object == extension.end()) {
+    return ErrorStatus("Mesh features extension is malformed.");
+  }
+  const tinygltf::Value &array = object->second;
+  if (!array.IsArray()) {
+    return ErrorStatus("Mesh features array is malformed.");
+  }
+  for (int i = 0; i < array.Size(); i++) {
+    // Create a new feature ID set object and populate it below.
+    mesh_features->push_back(std::unique_ptr<MeshFeatures>(new MeshFeatures()));
+    MeshFeatures &features = *mesh_features->back();
+
+    const auto &object = array.Get(i);
+    if (!object.IsObject()) {
+      return ErrorStatus("Mesh features array entry is malformed.");
+    }
+
+    // The "featureCount" property is required.
+    {
+      constexpr char kName[] = "featureCount";
+      if (!object.Has(kName)) {
+        return ErrorStatus("Mesh features is malformed.");
+      }
+      const tinygltf::Value &value = object.Get(kName);
+      if (!value.IsInt()) {
+        return ErrorStatus("Feature count property is malformed.");
+      }
+      features.SetFeatureCount(value.Get<int>());
+    }
+
+    // All other properties are optional.
+    {
+      constexpr char kName[] = "nullFeatureId";
+      if (object.Has(kName)) {
+        const tinygltf::Value &value = object.Get(kName);
+        if (!value.IsInt()) {
+          return ErrorStatus("Null feature ID property is malformed.");
+        }
+        features.SetNullFeatureId(value.Get<int>());
+      }
+    }
+    {
+      constexpr char kName[] = "label";
+      if (object.Has(kName)) {
+        const tinygltf::Value &value = object.Get(kName);
+        if (!value.IsString()) {
+          return ErrorStatus("Label property is malformed.");
+        }
+        features.SetLabel(value.Get<std::string>());
+      }
+    }
+    {
+      constexpr char kName[] = "attribute";
+      if (object.Has(kName)) {
+        const tinygltf::Value &value = object.Get(kName);
+        if (!value.IsInt()) {
+          return ErrorStatus("Attribute property is malformed.");
+        }
+        features.SetAttributeIndex(value.Get<int>());
+      }
+    }
+    {
+      constexpr char kName[] = "texture";
+      if (object.Has(kName)) {
+        const tinygltf::Value &value = object.Get(kName);
+        if (!value.IsObject()) {
+          return ErrorStatus("Texture property is malformed.");
+        }
+
+        // Decode texture contining mesh feature IDs into the |features| object
+        // via a temporary |material| object.
+        Material material(texture_library);
+        const auto &container_object = object.Get<tinygltf::Value::Object>();
+        DRACO_RETURN_IF_ERROR(DecodeTexture(kName, TextureMap::GENERIC,
+                                            container_object, &material));
+        features.SetTextureMap(
+            *material.GetTextureMapByType(TextureMap::GENERIC));
+
+        // Decode array of texture channel indices.
+        std::vector<int> channels;
+        {
+          constexpr char kName[] = "channels";
+          if (value.Has(kName)) {
+            const tinygltf::Value &array = value.Get(kName);
+            if (!array.IsArray()) {
+              return ErrorStatus("Channels property is malformed.");
+            }
+            for (int i = 0; i < array.Size(); i++) {
+              const tinygltf::Value &value = array.Get(i);
+              if (!value.IsNumber()) {
+                return Status(Status::DRACO_ERROR,
+                              "Channels value is malformed.");
+              }
+              channels.push_back(value.Get<int>());
+            }
+          } else {
+            channels = {0};
+          }
+        }
+        features.SetTextureChannels(channels);
+      }
+    }
+    {
+      constexpr char kName[] = "propertyTable";
+      if (object.Has(kName)) {
+        const tinygltf::Value &value = object.Get(kName);
+        if (!value.IsInt()) {
+          return ErrorStatus("Property table property is malformed.");
+        }
+        features.SetPropertyTableIndex(value.Get<int>());
+      }
+    }
+  }
+  return OkStatus();
+}
+
+template <typename BuilderT>
 StatusOr<int> GltfDecoder::AddAttribute(const std::string &attribute_name,
                                         int component_type, int type,
-                                        TriangleSoupMeshBuilder *mb) {
+                                        BuilderT *builder) {
   const GeometryAttribute::Type draco_att_type =
       GltfAttributeToDracoAttribute(attribute_name);
   if (draco_att_type == GeometryAttribute::INVALID) {
-    return Status(Status::DRACO_ERROR,
-                  "Attribute " + attribute_name + " is not supported.");
+    // Return attribute id -1 that will be ignored and not included in the mesh.
+    return -1;
   }
   DRACO_ASSIGN_OR_RETURN(
-      const int att_id, AddAttribute(draco_att_type, component_type, type, mb));
+      const int att_id,
+      AddAttribute(draco_att_type, component_type, type, builder));
   return att_id;
 }
 
+template <typename BuilderT>
 StatusOr<int> GltfDecoder::AddAttribute(GeometryAttribute::Type attribute_type,
                                         int component_type, int type,
-                                        TriangleSoupMeshBuilder *mb) {
+                                        BuilderT *builder) {
   const int num_components = TinyGltfUtils::GetNumComponentsForType(type);
   if (num_components == 0) {
     return Status(Status::DRACO_ERROR,
@@ -1376,8 +2162,8 @@ StatusOr<int> GltfDecoder::AddAttribute(GeometryAttribute::Type attribute_type,
     return Status(Status::DRACO_ERROR,
                   "Could not add attribute with invalid type.");
   }
-  const int att_id =
-      mb->AddAttribute(attribute_type, num_components, draco_component_type);
+  const int att_id = builder->AddAttribute(attribute_type, num_components,
+                                           draco_component_type);
   if (att_id < 0) {
     return Status(Status::DRACO_ERROR, "Could not add attribute.");
   }
@@ -1805,6 +2591,51 @@ StatusOr<bool> GltfDecoder::DecodeFloat(const std::string &name,
   return true;
 }
 
+StatusOr<bool> GltfDecoder::DecodeInt(const std::string &name,
+                                      const tinygltf::Value::Object &object,
+                                      int *value) {
+  const auto &it = object.find(name);
+  if (it == object.end()) {
+    return false;
+  }
+  const tinygltf::Value &number = it->second;
+  if (!number.IsNumber()) {
+    return ErrorStatus("Invalid " + name + ".");
+  }
+  *value = number.Get<int>();
+  return true;
+}
+
+StatusOr<bool> GltfDecoder::DecodeString(const std::string &name,
+                                         const tinygltf::Value::Object &object,
+                                         std::string *value) {
+  const auto &it = object.find(name);
+  if (it == object.end()) {
+    return false;
+  }
+  const tinygltf::Value &string = it->second;
+  if (!string.IsString()) {
+    return ErrorStatus("Invalid " + name + ".");
+  }
+  *value = string.Get<std::string>();
+  return true;
+}
+
+StatusOr<bool> GltfDecoder::DecodePropertyTableData(
+    const std::string &name, const tinygltf::Value::Object &object,
+    PropertyTable::Property::Data *data) {
+  int buffer_view_index;
+  DRACO_ASSIGN_OR_RETURN(const bool success,
+                         DecodeInt(name, object, &buffer_view_index));
+  if (!success) {
+    return false;
+  }
+  DRACO_RETURN_IF_ERROR(
+      CopyDataFromBufferView(gltf_model_, buffer_view_index, &data->data));
+  data->target = gltf_model_.bufferViews[buffer_view_index].target;
+  return true;
+}
+
 StatusOr<bool> GltfDecoder::DecodeVector3f(
     const std::string &name, const tinygltf::Value::Object &object,
     Vector3f *value) {
@@ -1912,10 +2743,10 @@ Status GltfDecoder::AddMaterialsToScene() {
   bool default_material_needed = false;
   for (MeshGroupIndex mgi(0); mgi < scene_->NumMeshGroups(); ++mgi) {
     MeshGroup *const mg = scene_->GetMeshGroup(mgi);
-    for (int mi = 0; mi < mg->NumMaterialIndices(); ++mi) {
-      const int material_index = mg->GetMaterialIndex(mi);
-      if (material_index == -1) {
-        mg->SetMaterialIndex(mi, default_material_index);
+    for (int mi = 0; mi < mg->NumMeshInstances(); ++mi) {
+      MeshGroup::MeshInstance &mesh_instance = mg->GetMeshInstance(mi);
+      if (mesh_instance.material_index == -1) {
+        mesh_instance.material_index = default_material_index;
         default_material_needed = true;
       }
     }
@@ -1930,15 +2761,14 @@ Status GltfDecoder::AddMaterialsToScene() {
   // Check if we need to generate tangent space for any of the loaded meshes.
   for (MeshGroupIndex mgi(0); mgi < scene_->NumMeshGroups(); ++mgi) {
     const MeshGroup *const mg = scene_->GetMeshGroup(mgi);
-    for (int mi = 0; mi < mg->NumMaterialIndices(); ++mi) {
-      const int material_index = mg->GetMaterialIndex(mi);
+    for (int mi = 0; mi < mg->NumMeshInstances(); ++mi) {
+      const MeshGroup::MeshInstance &mesh_instance = mg->GetMeshInstance(mi);
       const auto tangent_map =
           scene_->GetMaterialLibrary()
-              .GetMaterial(material_index)
+              .GetMaterial(mesh_instance.material_index)
               ->GetTextureMapByType(TextureMap::NORMAL_TANGENT_SPACE);
       if (tangent_map != nullptr) {
-        const MeshIndex mesh_index = mg->GetMeshIndex(mi);
-        Mesh &mesh = scene_->GetMesh(mesh_index);
+        Mesh &mesh = scene_->GetMesh(mesh_instance.mesh_index);
         if (mesh.GetNamedAttribute(GeometryAttribute::TANGENT) == nullptr) {
           meshes_that_need_tangents.insert(&mesh);
         }
@@ -1991,6 +2821,47 @@ Status GltfDecoder::AddSkinsToScene() {
   return OkStatus();
 }
 
+void GltfDecoder::MoveNonMaterialTextures(Mesh *mesh) {
+  std::unordered_set<Texture *> non_material_textures;
+  for (MeshFeaturesIndex i(0); i < mesh->NumMeshFeatures(); i++) {
+    Texture *const texture = mesh->GetMeshFeatures(i).GetTextureMap().texture();
+    if (texture != nullptr) {
+      non_material_textures.insert(texture);
+    }
+  }
+  MoveNonMaterialTextures(non_material_textures,
+                          &mesh->GetMaterialLibrary().MutableTextureLibrary(),
+                          &mesh->GetNonMaterialTextureLibrary());
+}
+
+void GltfDecoder::MoveNonMaterialTextures(Scene *scene) {
+  std::unordered_set<Texture *> non_material_textures;
+  for (MeshIndex i(0); i < scene->NumMeshes(); i++) {
+    for (MeshFeaturesIndex j(0); j < scene->GetMesh(i).NumMeshFeatures(); j++) {
+      Texture *const texture =
+          scene->GetMesh(i).GetMeshFeatures(j).GetTextureMap().texture();
+      if (texture != nullptr) {
+        non_material_textures.insert(texture);
+      }
+    }
+  }
+  MoveNonMaterialTextures(non_material_textures,
+                          &scene->GetMaterialLibrary().MutableTextureLibrary(),
+                          &scene->GetNonMaterialTextureLibrary());
+}
+
+void GltfDecoder::MoveNonMaterialTextures(
+    const std::unordered_set<Texture *> &non_material_textures,
+    TextureLibrary *material_tl, TextureLibrary *non_material_tl) {
+  // TODO(vytyaz): Consider textures that are both material and non-material.
+  for (int i = 0; i < material_tl->NumTextures(); i++) {
+    // Move non-material texture from material to non-material texture library.
+    if (non_material_textures.count(material_tl->GetTexture(i)) == 1) {
+      non_material_tl->PushTexture(material_tl->RemoveTexture(i--));
+    }
+  }
+}
+
 bool GltfDecoder::PrimitiveSignature::operator==(
     const PrimitiveSignature &signature) const {
   return primitive.indices == signature.primitive.indices &&
@@ -2013,6 +2884,25 @@ size_t GltfDecoder::PrimitiveSignature::Hash::operator()(
   hash = HashCombine(signature.primitive.indices, hash);
   hash = HashCombine(signature.primitive.mode, hash);
   return hash;
+}
+
+StatusOr<std::unique_ptr<Mesh>> GltfDecoder::BuildMeshFromBuilder(
+    bool use_mesh_builder, TriangleSoupMeshBuilder *mb, PointCloudBuilder *pb) {
+  std::unique_ptr<Mesh> mesh;
+  if (use_mesh_builder) {
+    mesh = mb->Finalize();
+  } else {
+    std::unique_ptr<PointCloud> pc = pb->Finalize(true);
+    if (pc) {
+      mesh.reset(new Mesh());
+      PointCloud *mesh_pc = mesh.get();
+      mesh_pc->Copy(*pc);
+    }
+  }
+  if (!mesh) {
+    return ErrorStatus("Failed to build Draco mesh from glTF data.");
+  }
+  return mesh;
 }
 
 }  // namespace draco

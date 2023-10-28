@@ -18,6 +18,7 @@
 #include <string>
 
 #include "draco/io/file_utils.h"
+#include "draco/io/file_writer_interface.h"
 #include "draco/io/obj_decoder.h"
 #include "draco/io/ply_decoder.h"
 #include "draco/io/stl_decoder.h"
@@ -64,6 +65,7 @@ StatusOr<std::unique_ptr<Mesh>> ReadMeshFromFile(
     // Wavefront OBJ file format.
     ObjDecoder obj_decoder;
     obj_decoder.set_use_metadata(options.GetBool("use_metadata", false));
+    obj_decoder.set_preserve_polygons(options.GetBool("preserve_polygons"));
     const Status obj_status =
         obj_decoder.DecodeFromFile(file_name, mesh.get(), mesh_files);
     if (!obj_status.ok()) {
